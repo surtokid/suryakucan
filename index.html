@@ -2262,6 +2262,7 @@ const DEFAULT_MORE_APPS = [
               type={wizardType}
               currentUser={currentUser}
               lokasiList={lokasiList}
+              divisiList={divisiList}
               shiftList={shiftList}
               toleransiMenit={toleransiMenit}
               onClose={() => setShowWizardModal(false)}
@@ -2401,7 +2402,7 @@ const DEFAULT_MORE_APPS = [
       );
     }
 
-    function PresensiWizardModal({ type, currentUser, lokasiList, shiftList, toleransiMenit, onClose, onSuccess }) {
+    function PresensiWizardModal({ type, currentUser, lokasiList, divisiList, shiftList, toleransiMenit, onClose, onSuccess }) {
       const [step, setStep] = useState(1);
       // Karyawan lama tanpa pengaturan lokasi tetap dapat memilih semua lokasi yang tersedia.
       const availableLokasiList = useMemo(() => {
@@ -2424,22 +2425,45 @@ const DEFAULT_MORE_APPS = [
       const [gpsLoading, setGpsLoading] = useState(true);
       const [gpsAccuracy, setGpsAccuracy] = useState(null);
 
-      // Urutkan shift berdasarkan jam masuk paling awal terlebih dahulu.
-      const sortedShiftList = [...(Array.isArray(shiftList) ? shiftList : [])].sort((a, b) => {
-        const toMinutes = (value) => {
-          const match = String(value || '').match(/^(\d{1,2}):(\d{2})/);
-          return match ? Number(match[1]) * 60 + Number(match[2]) : Number.MAX_SAFE_INTEGER;
-        };
-        return toMinutes(a.jam_masuk) - toMinutes(b.jam_masuk) ||
-          String(a.nama_shift || '').localeCompare(String(b.nama_shift || ''), 'id');
-      });
-      const [selectedShift, setSelectedShift] = useState(sortedShiftList[0]?.nama_shift || '');
-      // Jika daftar shift baru selesai dimuat, pilih shift dengan jam masuk paling pagi.
-      useEffect(() => {
-        if (sortedShiftList.length && !sortedShiftList.some(s => s.nama_shift === selectedShift)) {
-          setSelectedShift(sortedShiftList[0].nama_shift || '');
+      // Batasi pilihan shift berdasarkan konfigurasi Master Divisi untuk divisi karyawan.
+      // Jika divisi belum ditemukan atau belum memiliki shift, jangan tampilkan semua shift
+      // karena itu dapat membuat karyawan memilih shift yang tidak diizinkan.
+      const currentDivision = (Array.isArray(divisiList) ? divisiList : []).find(d =>
+        String(d.nama_divisi || '').trim().toLocaleLowerCase('id') ===
+        String(currentUser?.divisi || '').trim().toLocaleLowerCase('id')
+      );
+      const allowedShiftNames = useMemo(() => {
+        const configured = currentDivision?.shifts;
+        let names = [];
+        if (Array.isArray(configured)) {
+          names = configured.map(item => typeof item === 'string' ? item : item?.nama_shift).filter(Boolean);
+        } else if (typeof configured === 'string' && configured.trim()) {
+          try {
+            const parsed = JSON.parse(configured);
+            names = Array.isArray(parsed) ? parsed.map(item => typeof item === 'string' ? item : item?.nama_shift).filter(Boolean) : [];
+          } catch (_) { names = configured.split(',').map(x => x.trim()).filter(Boolean); }
         }
-      }, [shiftList, selectedShift]);
+        return new Set(names.map(name => String(name).trim().toLocaleLowerCase('id')));
+      }, [currentDivision]);
+      const sortedShiftList = useMemo(() => {
+        const all = Array.isArray(shiftList) ? shiftList : [];
+        const allowed = all.filter(shift => allowedShiftNames.has(String(shift.nama_shift || '').trim().toLocaleLowerCase('id')));
+        return allowed.sort((a, b) => {
+          const toMinutes = (value) => {
+            const match = String(value || '').match(/^(\d{1,2}):(\d{2})/);
+            return match ? Number(match[1]) * 60 + Number(match[2]) : Number.MAX_SAFE_INTEGER;
+          };
+          return toMinutes(a.jam_masuk) - toMinutes(b.jam_masuk) ||
+            String(a.nama_shift || '').localeCompare(String(b.nama_shift || ''), 'id');
+        });
+      }, [shiftList, allowedShiftNames]);
+      const [selectedShift, setSelectedShift] = useState('');
+      // Pilih shift paling pagi dari shift yang diizinkan saja.
+      useEffect(() => {
+        if (!sortedShiftList.some(s => s.nama_shift === selectedShift)) {
+          setSelectedShift(sortedShiftList[0]?.nama_shift || '');
+        }
+      }, [sortedShiftList, selectedShift]);
       const [statusPulang, setStatusPulang] = useState('Pulang');
       const [alasanPulang, setAlasanPulang] = useState('');
 
@@ -2823,7 +2847,7 @@ const DEFAULT_MORE_APPS = [
                 {type === 'masuk' ? (
                   <div className="space-y-2.5">
                     <label className="text-[10px] font-bold text-slate-400 block mb-1">Pilih Shift Kerja Hari Ini</label>
-                    {sortedShiftList.map(s => (
+                    {sortedShiftList.length > 0 ? sortedShiftList.map(s => (
                       <div 
                         key={s.id} 
                         onClick={() => setSelectedShift(s.nama_shift)} 
@@ -2839,7 +2863,13 @@ const DEFAULT_MORE_APPS = [
                         </div>
                         {selectedShift === s.nama_shift && <i className="fa-solid fa-circle-check text-violet-500 text-lg"></i>}
                       </div>
-                    ))}
+                    )) : (
+                      <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-center">
+                        <i className="fa-solid fa-triangle-exclamation text-amber-500 text-xl mb-2"></i>
+                        <p className="text-xs font-bold text-amber-800">Belum ada shift yang ditetapkan untuk divisi {currentUser?.divisi || 'Anda'}.</p>
+                        <p className="text-[10px] text-amber-700 mt-1">Silakan hubungi administrator untuk mengatur shift di menu Master Divisi.</p>
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="space-y-3">
