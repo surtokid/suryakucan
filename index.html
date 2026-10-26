@@ -379,6 +379,29 @@ const DEFAULT_MORE_APPS = [
   { label: 'Kasir Surcan', icon: 'fa-store', description: 'Kasir untuk event di luar toko.', color: 'from-cyan-50 to-teal-100', ink: 'text-teal-700' }
 ];
 
+    // Dialog modern pengganti alert/confirm bawaan browser (This Page Says).
+    function showModernDialog(message, options = {}) {
+      return new Promise(resolve => {
+        const old = document.getElementById('suryakucan-modern-dialog');
+        if (old) old.remove();
+        const confirmMode = !!options.confirm;
+        const overlay = document.createElement('div');
+        overlay.id = 'suryakucan-modern-dialog';
+        overlay.style.cssText = 'position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(15,23,42,.48);backdrop-filter:blur(7px);font-family:Inter,system-ui,sans-serif;';
+        overlay.innerHTML = `<div role="dialog" aria-modal="true" style="width:min(100%,390px);background:#fff;border-radius:24px;padding:24px;box-shadow:0 25px 80px rgba(15,23,42,.28);border:1px solid #f1f5f9;transform:translateY(0);animation:scDialogIn .18s ease-out"><div style="width:48px;height:48px;border-radius:16px;background:${confirmMode?'#fff7ed':'#fdf2f8'};color:${confirmMode?'#c2410c':'#db2777'};display:flex;align-items:center;justify-content:center;font-size:23px;margin-bottom:16px">${confirmMode?'!':'✓'}</div><h3 style="font-size:18px;font-weight:800;color:#0f172a;margin:0 0 8px">${options.title || (confirmMode?'Konfirmasi':'Informasi')}</h3><p style="font-size:14px;line-height:1.6;color:#475569;white-space:pre-wrap;margin:0 0 22px"></p><div style="display:flex;justify-content:flex-end;gap:10px"><button data-cancel style="display:${confirmMode?'inline-flex':'none'};padding:10px 16px;border-radius:12px;border:1px solid #e2e8f0;background:#fff;color:#475569;font-weight:700;cursor:pointer">Batal</button><button data-ok style="padding:10px 18px;border-radius:12px;border:0;background:linear-gradient(135deg,#e03ea0,#822ab0);color:#fff;font-weight:800;cursor:pointer">${confirmMode?'Ya, lanjutkan':'Mengerti'}</button></div></div>`;
+        overlay.querySelector('p').textContent = String(message ?? '');
+        const finish = value => { overlay.remove(); resolve(value); };
+        overlay.querySelector('[data-ok]').onclick = () => finish(true);
+        overlay.querySelector('[data-cancel]').onclick = () => finish(false);
+        overlay.addEventListener('click', e => { if (e.target === overlay && confirmMode) finish(false); });
+        const style = document.createElement('style'); style.textContent='@keyframes scDialogIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}'; overlay.appendChild(style);
+        document.body.appendChild(overlay);
+        overlay.querySelector('[data-ok]').focus();
+      });
+    }
+    window.alert = (message) => { showModernDialog(message); };
+    const modernConfirm = (message, title) => showModernDialog(message, { confirm: true, title: title || 'Konfirmasi tindakan' });
+
     function App() {
       const [currentRoute, setCurrentRoute] = useState(window.location.hash || '#karyawan');
     
@@ -1432,6 +1455,7 @@ const DEFAULT_MORE_APPS = [
     }) {
       const [clock, setClock] = useState(new Date());
       const [showYesterdayCheck, setShowYesterdayCheck] = useState(false);
+      const [selectedClaimShift, setSelectedClaimShift] = useState('');
       const [selectedAnnouncement, setSelectedAnnouncement] = useState(null);
       const [showWizardModal, setShowWizardModal] = useState(false);
       const [wizardType, setWizardType] = useState('masuk'); 
@@ -1517,9 +1541,23 @@ const DEFAULT_MORE_APPS = [
               String(p.karyawan_id) === String(currentUser.id) &&
               String(p.tanggal || '').slice(0, 10) === yStr
             );
+            // Jika karyawan sudah mengajukan klaim untuk kemarin, jangan munculkan popup lagi.
+            const { data: claimRows, error: claimError } = await client
+              .from('klaim_kehadiran')
+              .select('id, karyawan_id, tanggal_klaim')
+              .eq('karyawan_id', currentUser.id)
+              .eq('tanggal_klaim', yStr)
+              .limit(1);
+            if (cancelled || claimError) {
+              if (claimError) console.warn('Verifikasi klaim kemarin gagal; popup ditunda:', claimError.message);
+              return;
+            }
+            const hasDirectClaim = Array.isArray(claimRows) && claimRows.length > 0;
+            const hasLoadedClaim = (Array.isArray(klaimList) ? klaimList : []).some(c =>
+              String(c.karyawan_id) === String(currentUser.id) && String(c.tanggal_klaim || '').slice(0, 10) === yStr
+            );
 
-            if (!cancelled && !hasDirectRecord && !hasLoadedRecord) {
-              // Jangan menandai pemeriksaan selesai sebelum karyawan memilih dan data tersimpan.
+            if (!cancelled && !hasDirectRecord && !hasLoadedRecord && !hasDirectClaim && !hasLoadedClaim) {
               setShowYesterdayCheck(true);
             } else if (!cancelled) {
               try { sessionStorage.setItem(checkKey, 'true'); } catch (_) {}
@@ -1531,7 +1569,7 @@ const DEFAULT_MORE_APPS = [
         })();
 
         return () => { cancelled = true; };
-      }, [currentUser?.id, isPresensiReady]);
+      }, [currentUser?.id, isPresensiReady, klaimList, presensiList]);
 
       const payrollCycle = useMemo(() => {
         const now = new Date();
@@ -1557,29 +1595,30 @@ const DEFAULT_MORE_APPS = [
       };
 
       const periodActivities = useMemo(() => {
-        const userRecords = presensiList.filter(p => p.karyawan_id === currentUser.id && isDateInPayrollCycle(p.tanggal));
-        const uniqueDates = [...new Set(userRecords.map(p => p.tanggal))].sort((a, b) => b.localeCompare(a));
+        const userRecords = presensiList.filter(p => String(p.karyawan_id) === String(currentUser.id) && isDateInPayrollCycle(String(p.tanggal || '').slice(0, 10)));
+        const userPendingClaims = (Array.isArray(klaimList) ? klaimList : []).filter(c =>
+          String(c.karyawan_id) === String(currentUser.id) &&
+          ['pending', 'menunggu', ''].includes(String(c.status || 'Pending').toLowerCase()) &&
+          isDateInPayrollCycle(String(c.tanggal_klaim || '').slice(0, 10))
+        );
+        const uniqueDates = [...new Set([...userRecords.map(p => String(p.tanggal || '').slice(0, 10)), ...userPendingClaims.map(c => String(c.tanggal_klaim || '').slice(0, 10))])].filter(Boolean).sort((a, b) => b.localeCompare(a));
 
         return uniqueDates.map(date => {
-          const masukRec = userRecords.find(p => p.tanggal === date && p.tipe === 'masuk');
-          const keluarRec = userRecords.find(p => p.tanggal === date && p.tipe === 'keluar');
-          const status = masukRec ? masukRec.status : (keluarRec ? keluarRec.status : 'Hadir');
-          const shift = masukRec?.shift_nama || keluarRec?.shift_nama || 'Reguler';
-          // Status non-kehadiran bukan presensi masuk/pulang; jangan tampilkan jam pada riwayat.
-          const statusTanpaJam = ['Libur', 'Sakit', 'Cuti', 'Izin'].includes(String(status || '').trim());
+          const masukRec = userRecords.find(p => String(p.tanggal || '').slice(0, 10) === date && p.tipe === 'masuk');
+          const keluarRec = userRecords.find(p => String(p.tanggal || '').slice(0, 10) === date && p.tipe === 'keluar');
+          const pendingClaim = !masukRec && !keluarRec ? userPendingClaims.find(c => String(c.tanggal_klaim || '').slice(0, 10) === date) : null;
+          const status = pendingClaim ? 'Pending' : (masukRec ? masukRec.status : (keluarRec ? keluarRec.status : 'Hadir'));
+          const shift = pendingClaim?.shift_nama || masukRec?.shift_nama || keluarRec?.shift_nama || 'Reguler';
+          const statusTanpaJam = pendingClaim || ['Libur', 'Sakit', 'Cuti', 'Izin'].includes(String(status || '').trim());
           const jamMasuk = statusTanpaJam ? '-' : (masukRec ? (masukRec.jam || '-') : '-');
           const jamPulang = statusTanpaJam ? '-' : (keluarRec ? (keluarRec.jam || '-') : '-');
-
           return {
-            id: masukRec?.id || keluarRec?.id || date,
-            tanggal: date,
-            status,
-            shift,
-            jamMasuk,
-            jamPulang
+            id: pendingClaim?.id || masukRec?.id || keluarRec?.id || date,
+            tanggal: date, status, shift, jamMasuk, jamPulang,
+            keterangan: pendingClaim ? 'Menunggu persetujuan HR' : (masukRec?.keterangan || keluarRec?.keterangan || '')
           };
         });
-      }, [presensiList, currentUser.id, payrollCycle]);
+      }, [presensiList, klaimList, currentUser.id, payrollCycle]);
 
       const filteredPeriodActivities = useMemo(() => {
         if (cutoffFilter === 'Semua') return periodActivities;
@@ -1773,26 +1812,63 @@ const DEFAULT_MORE_APPS = [
         }
       };
 
-      const handleYesterdayClaimHR = () => {
-        // Klaim HR harus memakai tanggal kemarin menurut kalender lokal pengguna.
+      const allowedClaimShifts = (() => {
+        const division = (Array.isArray(divisiList) ? divisiList : []).find(d =>
+          String(d.nama_divisi || '').trim().toLocaleLowerCase('id') === String(currentUser?.divisi || '').trim().toLocaleLowerCase('id')
+        );
+        let names = [];
+        const configured = division?.shifts;
+        if (Array.isArray(configured)) names = configured.map(item => typeof item === 'string' ? item : item?.nama_shift).filter(Boolean);
+        else if (typeof configured === 'string' && configured.trim()) {
+          try { const parsed = JSON.parse(configured); names = Array.isArray(parsed) ? parsed.map(item => typeof item === 'string' ? item : item?.nama_shift).filter(Boolean) : []; }
+          catch (_) { names = configured.split(',').map(x => x.trim()).filter(Boolean); }
+        }
+        const allowed = new Set(names.map(name => String(name).trim().toLocaleLowerCase('id')));
+        return (Array.isArray(shiftList) ? shiftList : []).filter(shift => allowed.has(String(shift.nama_shift || '').trim().toLocaleLowerCase('id'))).sort((a,b) => String(a.jam_masuk || '').localeCompare(String(b.jam_masuk || '')));
+      })();
+
+      const handleYesterdayClaimHR = async () => {
+        if (!selectedClaimShift) {
+          showToast('Pilih shift yang Anda jalani kemarin terlebih dahulu.', 'error');
+          return;
+        }
         const nowLocal = new Date();
         const yesterday = new Date(nowLocal.getFullYear(), nowLocal.getMonth(), nowLocal.getDate() - 1);
         const yStr = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`;
-        
+        const selectedShift = allowedClaimShifts.find(s => String(s.nama_shift) === String(selectedClaimShift));
+        if (!selectedShift) {
+          showToast('Shift yang dipilih tidak ditemukan pada Master Shift divisi Anda.', 'error');
+          return;
+        }
         const claim = {
           id: 'klm-' + Date.now(),
           karyawan_id: currentUser.id,
           karyawan_nama: currentUser.nama_lengkap,
           divisi: currentUser.divisi,
           tanggal_klaim: yStr,
+          shift_nama: selectedShift.nama_shift,
+          shift_jam_masuk: selectedShift.jam_masuk || '',
+          shift_jam_pulang: selectedShift.jam_pulang || '',
           status: 'Pending',
-          catatan: 'Karyawan mengklaim hadir kemarin namun belum tercatat. Menunggu verifikasi HR.',
+          catatan: 'Menunggu verifikasi HR.',
           created_at: new Date().toISOString()
         };
-
-        setKlaimList([claim, ...klaimList]);
-        setShowYesterdayCheck(false);
-        showToast('Tiket klaim kehadiran dikirimkan ke HRD!');
+        try {
+          const client = await getSupabaseClient();
+          const { error } = await client.from('klaim_kehadiran').insert([claim]);
+          if (error) throw error;
+          setKlaimList([claim, ...(Array.isArray(klaimList) ? klaimList : [])]);
+          setShowYesterdayCheck(false);
+          try {
+            const today = new Date();
+            const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+            sessionStorage.setItem(`yesterday_checked_v2_${currentUser.id}_${todayKey}`, 'true');
+          } catch (_) {}
+          showToast('Klaim kehadiran berhasil dikirim ke HRD. Pop-up tidak akan muncul lagi untuk tanggal ini.');
+        } catch (error) {
+          console.error('Gagal mengirim klaim kehadiran:', error);
+          showToast(`Klaim gagal dikirim: ${error?.message || 'periksa koneksi dan izin tabel klaim_kehadiran.'}`, 'error');
+        }
       };
 
       return (
@@ -1839,6 +1915,24 @@ const DEFAULT_MORE_APPS = [
                   {clock.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                 </p>
                 <p className="text-[11px] font-medium text-slate-600 mt-0.5">{formatIndoDate(clock)}</p>
+                {todayAttendanceMasuk && (() => {
+                  const shiftNama = String(todayAttendanceMasuk.shift_nama || '').trim();
+                  const shiftTerpilih = (Array.isArray(shiftList) ? shiftList : []).find(s =>
+                    String(s.nama_shift || '').trim().toLocaleLowerCase('id') === shiftNama.toLocaleLowerCase('id')
+                  );
+                  return (
+                    <div className="mt-2 rounded-xl border border-violet-100 bg-gradient-to-r from-violet-50 to-fuchsia-50 px-3 py-1.5 text-center shadow-sm">
+                      <p className="text-[9px] leading-tight font-bold uppercase tracking-wider text-violet-500">Shift Operasional Anda</p>
+                      {shiftTerpilih ? (
+                        <p className="mt-0.5 text-[11px] leading-snug font-extrabold text-slate-800 break-words">
+                          {shiftNama || 'Shift belum tercatat'} <span className="font-semibold text-slate-500">- {formatShiftTimeDisplay(shiftTerpilih.jam_masuk)} – {formatShiftTimeDisplay(shiftTerpilih.jam_pulang)} WIB</span>
+                        </p>
+                      ) : (
+                        <p className="mt-0.5 text-[10px] leading-snug text-slate-500">{shiftNama || 'Shift belum tercatat'} - Jam operasional tidak ditemukan di Master Shift.</p>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
 
               {/* Tombol presensi: satu tombol nonaktif jika status Sakit/Izin/Cuti/Libur sudah tercatat hari ini */}
@@ -1947,6 +2041,7 @@ const DEFAULT_MORE_APPS = [
             <RiwayatAktivitasView 
               currentUser={currentUser} 
               presensiList={presensiList} 
+              klaimList={klaimList}
               lemburList={lemburList}
               payrollCycle={payrollCycle}
               filterStatus={filterStatusRiwayat}
@@ -2211,6 +2306,7 @@ const DEFAULT_MORE_APPS = [
                             act.status === 'Izin' ? 'bg-orange-100 text-orange-700 border border-orange-200' :
                             act.status === 'Sakit' ? 'bg-amber-100 text-amber-700 border border-amber-200' :
                             act.status === 'Cuti' ? 'bg-purple-100 text-purple-700 border border-purple-200' :
+                            act.status === 'Pending' ? 'bg-amber-100 text-amber-800 border border-amber-200' :
                             'bg-slate-200 text-slate-700'
                           }`}>
                             {act.status}
@@ -2238,6 +2334,8 @@ const DEFAULT_MORE_APPS = [
                             </div>
                           )}
                         </div>
+                        {act.status === 'Pending' && <div className="text-[10px] leading-relaxed text-amber-800 bg-amber-50 border border-amber-100 rounded-xl px-3 py-2"><i className="fa-regular fa-clock mr-1.5"></i>Menunggu persetujuan HR</div>}
+                        {act.keterangan && /disetujui HR/i.test(act.keterangan) && <div className="text-[10px] leading-relaxed text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-xl px-3 py-2"><i className="fa-solid fa-circle-check mr-1.5"></i>{act.keterangan}</div>}
                       </div>
                     ))
                   ) : (
@@ -2396,7 +2494,15 @@ const DEFAULT_MORE_APPS = [
                   </button>
                 </div>
 
-                <button onClick={handleYesterdayClaimHR} className="w-full py-3.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-full shadow-md mb-2">
+                <div className="mb-3 rounded-2xl border border-violet-100 bg-violet-50/70 p-3 text-left">
+                  <label htmlFor="yesterdayClaimShift" className="block text-[11px] font-extrabold text-violet-800 mb-2">Pilih shift yang dijalani kemarin</label>
+                  <select id="yesterdayClaimShift" value={selectedClaimShift} onChange={e => setSelectedClaimShift(e.target.value)} className="w-full rounded-xl border border-violet-200 bg-white px-3 py-3 text-xs font-bold text-slate-700 outline-none focus:ring-2 focus:ring-violet-300">
+                    <option value="">-- Pilih Shift --</option>
+                    {allowedClaimShifts.map(shift => <option key={shift.id || shift.nama_shift} value={shift.nama_shift}>{shift.nama_shift} ({formatShiftTimeDisplay(shift.jam_masuk)} - {formatShiftTimeDisplay(shift.jam_pulang)})</option>)}
+                  </select>
+                  {allowedClaimShifts.length === 0 && <p className="text-[10px] text-rose-600 mt-2">Belum ada shift yang ditetapkan untuk divisi Anda. Hubungi HRD.</p>}
+                </div>
+                <button onClick={handleYesterdayClaimHR} disabled={!selectedClaimShift || allowedClaimShifts.length === 0} className="w-full py-3.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold text-xs rounded-full shadow-md mb-2">
                   Kemarin Masuk (Klaim ke HR)
                 </button>
                 <button onClick={() => setShowYesterdayCheck(false)} className="w-full py-2.5 text-slate-400 hover:text-slate-600 text-[11px] font-bold">
@@ -2459,8 +2565,14 @@ const DEFAULT_MORE_APPS = [
         const all = Array.isArray(lokasiList) ? lokasiList : [];
         const hasAssignment = Array.isArray(currentUser?.lokasi_absen);
         const assigned = hasAssignment ? currentUser.lokasi_absen.map(String) : [];
+        if (assigned.includes('*')) {
+          const selectedIds = assigned.filter(id => id !== '*');
+          // Unlock mengabaikan radius, bukan pilihan lokasi. Jika data lama hanya berisi '*', tampilkan semua lokasi sebagai kompatibilitas.
+          return selectedIds.length ? all.filter(l => selectedIds.includes(String(l.id))) : all;
+        }
         return hasAssignment ? all.filter(l => assigned.includes(String(l.id))) : all;
       }, [lokasiList, currentUser?.lokasi_absen]);
+      const locationUnlocked = Array.isArray(currentUser?.lokasi_absen) && currentUser.lokasi_absen.map(String).includes('*');
       const [selectedLokasi, setSelectedLokasi] = useState(() => availableLokasiList[0] || null);
 
       // Jika daftar lokasi berubah, pastikan lokasi terpilih tetap termasuk lokasi yang diizinkan.
@@ -2529,6 +2641,7 @@ const DEFAULT_MORE_APPS = [
       const officeCircleRef = useRef(null);
 
       const getGPSLocation = () => {
+        // Unlock Lokasi hanya melewati validasi radius; GPS dan peta tetap aktif untuk pratinjau posisi.
         if (!selectedLokasi || !Number.isFinite(Number(selectedLokasi.latitude)) || !Number.isFinite(Number(selectedLokasi.longitude))) {
           setGpsLoading(false);
           setUserCoords(null);
@@ -2716,7 +2829,8 @@ const DEFAULT_MORE_APPS = [
 
       const handleFinalSubmit = async () => {
         if (isUploading) return;
-        if (!selectedLokasi) { alert('Lokasi kantor belum tersedia. Silakan tutup presensi, tunggu data selesai dimuat, lalu coba lagi.'); return; }
+        if (!selectedLokasi) { alert('Silakan pilih lokasi presensi terlebih dahulu.'); return; }
+        if (!locationUnlocked && !inRadius) { alert('Posisi Anda masih di luar radius lokasi yang dipilih.'); return; }
         if (type === 'masuk' && !selectedShift) { alert('Silakan pilih shift kerja terlebih dahulu.'); return; }
         setIsUploading(true);
         try {
@@ -2756,9 +2870,9 @@ const DEFAULT_MORE_APPS = [
           status: finalStatus,
           shift_nama: selectedShift,
           lokasi_id: selectedLokasi.id,
-          lokasi_nama: selectedLokasi.nama_lokasi,
-          latitude: userCoords?.lat || selectedLokasi.latitude,
-          longitude: userCoords?.lng || selectedLokasi.longitude,
+          lokasi_nama: locationUnlocked ? `${selectedLokasi.nama_lokasi} (Unlock Lokasi HR)` : selectedLokasi.nama_lokasi,
+          latitude: userCoords?.lat ?? null,
+          longitude: userCoords?.lng ?? null,
           foto_url: uploadedPhotoUrl,
           keterangan: type === 'keluar' && statusPulang !== 'Pulang' ? alasanPulang : (finalStatus === 'Terlambat' ? 'Terlambat masuk' : 'Presensi App'),
           tanggal: dateStr,
@@ -2810,8 +2924,9 @@ const DEFAULT_MORE_APPS = [
                 <button onClick={onClose} className="w-full py-3 rounded-full bg-slate-900 text-white text-xs font-bold">Tutup</button>
               </div>
             )}
-            {step === 1 && selectedLokasi && (
-              <div className="space-y-3.5">
+            {step === 1 && selectedLokasi && (<div className="space-y-3.5">
+                {locationUnlocked && <div className="rounded-2xl bg-emerald-50 border border-emerald-200 p-3 text-[11px] leading-relaxed text-emerald-800"><b><i className="fa-solid fa-lock-open mr-1.5"></i>Unlock Lokasi aktif.</b> Pilih lokasi kantor dan lihat posisi Anda di peta seperti biasa. Anda tetap bisa melanjutkan presensi dari luar radius kantor.</div>}
+                
                 <div>
                   <label className="text-[10px] font-bold text-slate-400 block mb-1">Pilih Titik Kantor Tujuan</label>
                   <select 
@@ -2853,13 +2968,13 @@ const DEFAULT_MORE_APPS = [
                 </div>
 
                 {/* Kotak Status Radius & Jarak Geofencing */}
-                <div className={`p-3.5 rounded-2xl flex items-center justify-between border ${inRadius ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-rose-50 border-rose-200 text-rose-700'}`}>
+                <div className={`p-3.5 rounded-2xl flex items-center justify-between border ${(locationUnlocked || inRadius) ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-rose-50 border-rose-200 text-rose-700'}`}>
                   <div className="flex items-center space-x-3">
-                    <div className={`w-9 h-9 rounded-full flex items-center justify-center ${inRadius ? 'bg-emerald-100 text-emerald-600' : 'bg-rose-100 text-rose-600'}`}>
-                      <i className={`fa-solid ${inRadius ? 'fa-circle-check' : 'fa-circle-xmark'} text-base`}></i>
+                    <div className={`w-9 h-9 rounded-full flex items-center justify-center ${(locationUnlocked || inRadius) ? 'bg-emerald-100 text-emerald-600' : 'bg-rose-100 text-rose-600'}`}>
+                      <i className={`fa-solid ${locationUnlocked ? 'fa-lock-open' : (inRadius ? 'fa-circle-check' : 'fa-circle-xmark')} text-base`}></i>
                     </div>
                     <div>
-                      <p className="text-xs font-bold">{inRadius ? 'Dalam Radius Kantor' : 'Di Luar Radius Kantor'}</p>
+                      <p className="text-xs font-bold">{locationUnlocked ? (gpsLoading ? 'Unlock Lokasi HR • Mencari GPS…' : 'Unlock Lokasi HR • Radius diabaikan') : (inRadius ? 'Dalam Radius Kantor' : 'Di Luar Radius Kantor')}</p>
                       <p className="text-[10px] font-mono-numbers opacity-85">
                         Jarak: <b>{distance !== null ? `${distance}m` : '...'}</b> / Maks: {selectedLokasi.radius_meter}m
                         {gpsAccuracy && ` • Akurasi: ±${gpsAccuracy}m`}
@@ -2879,17 +2994,16 @@ const DEFAULT_MORE_APPS = [
                 {/* Tombol Lanjut */}
                 <button 
                   onClick={() => setStep(2)} 
-                  disabled={!inRadius} 
+                  disabled={!locationUnlocked && (!inRadius || gpsLoading)} 
                   className={`w-full py-3.5 rounded-full font-bold text-xs transition shadow-sm ${
-                    inRadius 
+                    (locationUnlocked || (inRadius && !gpsLoading))
                       ? 'bg-slate-900 text-white hover:bg-slate-800 active:scale-95' 
                       : 'bg-slate-100 text-slate-400 cursor-not-allowed'
                   }`}
                 >
-                  Lanjutkan Presensi
+                  {locationUnlocked ? 'Lanjutkan Presensi (Unlock Lokasi)' : 'Lanjutkan Presensi'}
                 </button>
-              </div>
-            )}
+              </div>)}
 
             {/* LANGKAH 2: Pemilihan Shift / Alasan Pulang */}
             {step === 2 && (
@@ -3388,7 +3502,9 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
 
           <div className="space-y-3">
             {filteredList.length > 0 ? filteredList.map((k, index) => {
-              const att = presensiList.find(p => p.karyawan_id === k.id && p.tanggal === todayStr && p.tipe === 'masuk');
+              const att = presensiList.find(p => String(p.karyawan_id) === String(k.id) && p.tanggal === todayStr && p.tipe === 'masuk');
+              const pulangAtt = presensiList.find(p => String(p.karyawan_id) === String(k.id) && p.tanggal === todayStr && p.tipe === 'keluar');
+              const sudahMasuk = !!att && ['Hadir', 'Terlambat'].includes(String(att.status || '').trim());
               return (
                 <div key={k.id} className="bg-white/90 backdrop-blur-xl p-4 rounded-3xl border border-slate-100 shadow-[0_4px_20px_rgb(0,0,0,0.03)]">
                   <div className="flex items-start gap-3 min-w-0">
@@ -3404,7 +3520,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                       <p className="text-[10px] text-slate-400 font-medium">
                         {k.divisi || 'Divisi belum diatur'}{k.jabatan ? ` - ${k.jabatan}` : ''}
                       </p>
-                      <div className="pt-0.5">
+                      <div className="pt-0.5 flex flex-wrap items-center gap-1.5">
                         {att ? (
                           <span className={`inline-flex px-3 py-1 rounded-full text-[9px] font-bold ${
                             att.status === 'Hadir' ? 'bg-emerald-50 text-emerald-600' :
@@ -3415,9 +3531,22 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                             att.status === 'Cuti' ? 'bg-purple-50 text-purple-600' :
                             'bg-slate-50 text-slate-600'
                           }`}>
+                            <i className="fa-solid fa-arrow-right-to-bracket mr-1 text-[8px]"></i>
                             {att.status}{!['Sakit', 'Libur', 'Izin', 'Cuti'].includes(String(att.status || '').trim()) && att.jam ? ` · ${att.jam}` : ''}
                           </span>
                         ) : <span className="inline-flex px-3 py-1 rounded-full text-[9px] font-bold bg-slate-50 text-slate-400">Belum Absen</span>}
+                        {sudahMasuk && (
+                          pulangAtt ? (
+                            <span className="inline-flex px-3 py-1 rounded-full text-[9px] font-bold bg-rose-50 text-rose-600" title="Status dan jam pulang">
+                              <i className="fa-solid fa-arrow-right-from-bracket mr-1 text-[8px]"></i>
+                              Pulang{pulangAtt.jam ? ` · ${pulangAtt.jam}` : ''}
+                            </span>
+                          ) : (
+                            <span className="inline-flex px-3 py-1 rounded-full text-[9px] font-bold bg-slate-50 text-slate-500" title="Belum melakukan presensi pulang">
+                              <i className="fa-regular fa-clock mr-1 text-[8px]"></i>Belum Pulang
+                            </span>
+                          )
+                        )}
                       </div>
                     </div>
                   </div>
@@ -3433,7 +3562,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
       );
     }
 
-    function RiwayatAktivitasView({ currentUser, presensiList, lemburList, payrollCycle, filterStatus, setFilterStatus }) {
+    function RiwayatAktivitasView({ currentUser, presensiList, klaimList = [], lemburList, payrollCycle, filterStatus, setFilterStatus }) {
       const [selectedPeriodIndex, setSelectedPeriodIndex] = useState(0);
 
       // Membuat daftar siklus 6 bulan ke belakang (Tanggal 26 s/d 25)
@@ -3465,29 +3594,30 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
 
       // Menggabungkan presensi masuk dan keluar per hari persis seperti kartu aktivitas periode
       const dailyActivities = useMemo(() => {
-        const userPresensi = presensiList.filter(p => p.karyawan_id === currentUser.id && isDateInPeriod(p.tanggal));
-        const uniqueDates = [...new Set(userPresensi.map(p => p.tanggal))].sort((a, b) => b.localeCompare(a));
+        const userPresensi = presensiList.filter(p => String(p.karyawan_id) === String(currentUser.id) && isDateInPeriod(String(p.tanggal || '').slice(0, 10)));
+        const userPendingClaims = (Array.isArray(klaimList) ? klaimList : []).filter(c =>
+          String(c.karyawan_id) === String(currentUser.id) &&
+          ['pending', 'menunggu', ''].includes(String(c.status || 'Pending').toLowerCase()) &&
+          isDateInPeriod(String(c.tanggal_klaim || '').slice(0, 10))
+        );
+        const uniqueDates = [...new Set([...userPresensi.map(p => String(p.tanggal || '').slice(0, 10)), ...userPendingClaims.map(c => String(c.tanggal_klaim || '').slice(0, 10))])].filter(Boolean).sort((a, b) => b.localeCompare(a));
 
         return uniqueDates.map(date => {
-          const masukRec = userPresensi.find(p => p.tanggal === date && p.tipe === 'masuk');
-          const keluarRec = userPresensi.find(p => p.tanggal === date && p.tipe === 'keluar');
-          const status = masukRec ? masukRec.status : (keluarRec ? keluarRec.status : 'Hadir');
-          const shift = masukRec?.shift_nama || keluarRec?.shift_nama || 'Reguler';
-          // Status non-kehadiran bukan presensi masuk/pulang; jangan tampilkan jam pada riwayat.
-          const statusTanpaJam = ['Libur', 'Sakit', 'Cuti', 'Izin'].includes(String(status || '').trim());
+          const masukRec = userPresensi.find(p => String(p.tanggal || '').slice(0, 10) === date && p.tipe === 'masuk');
+          const keluarRec = userPresensi.find(p => String(p.tanggal || '').slice(0, 10) === date && p.tipe === 'keluar');
+          const pendingClaim = !masukRec && !keluarRec ? userPendingClaims.find(c => String(c.tanggal_klaim || '').slice(0, 10) === date) : null;
+          const status = pendingClaim ? 'Pending' : (masukRec ? masukRec.status : (keluarRec ? keluarRec.status : 'Hadir'));
+          const shift = pendingClaim?.shift_nama || masukRec?.shift_nama || keluarRec?.shift_nama || 'Reguler';
+          const statusTanpaJam = pendingClaim || ['Libur', 'Sakit', 'Cuti', 'Izin'].includes(String(status || '').trim());
           const jamMasuk = statusTanpaJam ? '-' : (masukRec ? (masukRec.jam || '-') : '-');
           const jamPulang = statusTanpaJam ? '-' : (keluarRec ? (keluarRec.jam || '-') : '-');
-
           return {
-            id: masukRec?.id || keluarRec?.id || date,
-            tanggal: date,
-            status,
-            shift,
-            jamMasuk,
-            jamPulang
+            id: pendingClaim?.id || masukRec?.id || keluarRec?.id || date,
+            tanggal: date, status, shift, jamMasuk, jamPulang,
+            keterangan: pendingClaim ? 'Menunggu persetujuan HR' : (masukRec?.keterangan || keluarRec?.keterangan || '')
           };
         });
-      }, [presensiList, currentUser.id, activePeriod]);
+      }, [presensiList, klaimList, currentUser.id, activePeriod]);
 
       // Filter daftar lembur pada periode aktif
       const periodLemburList = useMemo(() => {
@@ -3499,6 +3629,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
         return {
           'Semua': dailyActivities.length,
           'Hadir': dailyActivities.filter(p => p.status === 'Hadir').length,
+          'Pending': dailyActivities.filter(p => p.status === 'Pending').length,
           'Terlambat': dailyActivities.filter(p => p.status === 'Terlambat').length,
           'Libur': dailyActivities.filter(p => p.status === 'Libur').length,
           'Izin': dailyActivities.filter(p => p.status === 'Izin').length,
@@ -3532,7 +3663,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
           </div>
           
           <div className="flex flex-wrap gap-2 pb-2 text-[10px] font-bold">
-            {['Semua', 'Hadir', 'Terlambat', 'Libur', 'Izin', 'Sakit', 'Cuti', 'Lembur'].map(f => (
+            {['Semua', 'Hadir', 'Pending', 'Terlambat', 'Libur', 'Izin', 'Sakit', 'Cuti', 'Lembur'].map(f => (
               <button 
                 key={f} 
                 onClick={() => setFilterStatus(f)} 
@@ -3579,6 +3710,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                         <i className="fa-solid fa-business-time text-[8px] mr-1"></i>{r.durasi_jam} Jam
                       </span>
                     </div>
+                    {act.keterangan && /disetujui HR/i.test(act.keterangan) && <div className="text-[10px] leading-relaxed text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-xl px-3 py-2"><i className="fa-solid fa-circle-check mr-1.5"></i>{act.keterangan}</div>}
                   </div>
                 ))
               ) : (
@@ -3607,6 +3739,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                         act.status === 'Izin' ? 'bg-orange-100 text-orange-700 border border-orange-200' :
                         act.status === 'Sakit' ? 'bg-amber-100 text-amber-700 border border-amber-200' :
                         act.status === 'Cuti' ? 'bg-purple-100 text-purple-700 border border-purple-200' :
+                        act.status === 'Pending' ? 'bg-amber-100 text-amber-800 border border-amber-200' :
                         'bg-slate-200 text-slate-700'
                       }`}>
                         {act.status}
@@ -3634,6 +3767,8 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                         </div>
                       )}
                     </div>
+                    {act.status === 'Pending' && <div className="text-[10px] leading-relaxed text-amber-800 bg-amber-50 border border-amber-100 rounded-xl px-3 py-2"><i className="fa-regular fa-clock mr-1.5"></i>Menunggu persetujuan HR</div>}
+                    {act.keterangan && /disetujui HR/i.test(act.keterangan) && <div className="text-[10px] leading-relaxed text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-xl px-3 py-2"><i className="fa-solid fa-circle-check mr-1.5"></i>{act.keterangan}</div>}
                   </div>
                 ))
               ) : (
@@ -3850,7 +3985,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
       const [activeModule, setActiveModule] = useState('harian'); 
       const [sidebarPinned, setSidebarPinned] = useState(true);
       const [hrdExpanded, setHrdExpanded] = useState(true);
-      const hrdModuleIds = ['harian', 'periode', 'shift', 'divisi', 'jabatan', 'lokasi', 'karyawan', 'libur_cuti', 'lembur'];
+      const hrdModuleIds = ['harian', 'periode', 'shift', 'divisi', 'jabatan', 'lokasi', 'karyawan', 'libur_cuti', 'lembur', 'klaim_kehadiran'];
       const activeAdminRecord = adminList.find(a => String(a.id) === String(currentUser?.id)) || currentUser || {};
       const allowedAdminMenus = decodeAdminMenuAccess(activeAdminRecord.role);
       const canAccessHrd = allowedAdminMenus.includes('hrd');
@@ -4120,7 +4255,8 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                       { id: 'lokasi', label: 'Master Lokasi', icon: 'fa-map-pin' },
                       { id: 'karyawan', label: 'Master Karyawan', icon: 'fa-users' },
                       { id: 'libur_cuti', label: 'Master Libur & Cuti', icon: 'fa-umbrella-beach' },
-                      { id: 'lembur', label: 'Pengajuan Lembur', icon: 'fa-business-time' }
+                      { id: 'lembur', label: 'Pengajuan Lembur', icon: 'fa-business-time' },
+                      { id: 'klaim_kehadiran', label: 'Klaim Kehadiran', icon: 'fa-file-circle-check' }
                     ].map(item => (
                       <button key={item.id} onClick={() => setActiveModule(item.id)} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition ${activeModule === item.id ? 'bg-violet-50 text-violet-700 shadow-sm border border-violet-100/50' : 'hover:bg-slate-50 text-slate-500'}`}>
                         <i className={`fa-solid ${item.icon} text-xs w-5 text-center ${activeModule === item.id ? 'text-violet-500' : ''}`}></i>
@@ -4795,8 +4931,19 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
               />
             )}
 
+            {activeModule === 'klaim_kehadiran' && (
+              <KlaimKehadiranAdminView
+                klaimList={klaimList}
+                setKlaimList={setKlaimList}
+                presensiList={presensiList}
+                setPresensiList={setPresensiList}
+                shiftList={shiftList}
+                showToast={showToast}
+              />
+            )}
+
             {activeModule === 'lokasi' && <MasterLokasiView lokasiList={lokasiList} setLokasiList={setLokasiList} showToast={showToast} />}
-            {activeModule === 'shift' && <MasterShiftView shiftList={shiftList} setShiftList={setShiftList} toleransiMenit={toleransiMenit} setToleransiMenit={setToleransiMenit} showToast={showToast} />}
+            {activeModule === 'shift' && <MasterShiftView shiftList={shiftList} setShiftList={setShiftList} divisiList={divisiList} setDivisiList={setDivisiList} toleransiMenit={toleransiMenit} setToleransiMenit={setToleransiMenit} showToast={showToast} />}
             {activeModule === 'divisi' && <MasterDivisiView divisiList={divisiList} setDivisiList={setDivisiList} shiftList={shiftList} showToast={showToast} />}
             {activeModule === 'jabatan' && <MasterJabatanView jabatanList={jabatanList} setJabatanList={setJabatanList} divisiList={divisiList} showToast={showToast} />}
             {activeModule === 'admin' && <MasterAdminView adminList={adminList} setAdminList={setAdminList} showToast={showToast} />}
@@ -4810,6 +4957,181 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
             )}
 
           </main>
+        </div>
+      );
+    }
+
+    function KlaimKehadiranAdminView({ klaimList = [], setKlaimList, presensiList = [], setPresensiList, shiftList = [], showToast }) {
+      const [filterStatus, setFilterStatus] = useState('Pending');
+      const [processingId, setProcessingId] = useState(null);
+      const [selectedClaimIds, setSelectedClaimIds] = useState([]);
+      const claims = (Array.isArray(klaimList) ? klaimList : []).filter(item => {
+        const status = String(item.status || 'Pending').toLowerCase();
+        if (filterStatus === 'Semua') return true;
+        if (filterStatus === 'Pending') return ['pending', 'menunggu', ''].includes(status);
+        if (filterStatus === 'Disetujui') return ['disetujui', 'disetujui hr', 'approved'].includes(status);
+        return false;
+      }).sort((a, b) => String(a.karyawan_nama || '').localeCompare(String(b.karyawan_nama || ''), 'id', { sensitivity: 'base' }));
+
+      const deleteApprovedClaim = async (claim) => {
+        if (!claim?.id || processingId) return;
+        if (!await modernConfirm(`Hapus riwayat pengajuan klaim ${claim.karyawan_nama || 'karyawan'}? Catatan presensi yang sudah disetujui di Rekapan Harian dan Riwayat karyawan TIDAK akan dihapus.`)) return;
+        setProcessingId(claim.id);
+        try {
+          const client = await getSupabaseClient();
+          const { error } = await client.from('klaim_kehadiran').delete().eq('id', claim.id);
+          if (error) throw error;
+          setKlaimList(prev => (Array.isArray(prev) ? prev : []).filter(item => String(item.id) !== String(claim.id)));
+          setSelectedClaimIds(prev => prev.filter(id => id !== String(claim.id)));
+          showToast('Riwayat pengajuan klaim dihapus. Catatan presensi yang telah disetujui tetap tersimpan.');
+        } catch (error) {
+          console.error('Gagal menghapus riwayat klaim yang disetujui:', error);
+          showToast(`Gagal menghapus riwayat klaim: ${error?.message || 'periksa izin Supabase.'}`, 'error');
+        } finally {
+          setProcessingId(null);
+        }
+      };
+
+      const processClaim = async (claim, action, silent = false) => {
+        if (!claim?.id || processingId) return false;
+        setProcessingId(claim.id);
+        try {
+          const client = await getSupabaseClient();
+          const safeClaimId = String(claim.id).replace(/[^a-zA-Z0-9_-]/g, '');
+          const masukId = 'prs-claim-' + safeClaimId;
+          const keluarId = 'prs-claim-' + safeClaimId + '-keluar';
+          const claimDate = String(claim.tanggal_klaim || '').slice(0, 10);
+          if (action === 'Ditolak') {
+            // Bersihkan catatan parsial yang mungkin sempat dibuat oleh versi sebelumnya.
+            const { error: cleanupError } = await client.from('presensi').delete().in('id', [masukId, keluarId]);
+            if (cleanupError) throw cleanupError;
+            const { error } = await client.from('klaim_kehadiran').delete().eq('id', claim.id);
+            if (error) throw error;
+            if (typeof setPresensiList === 'function') setPresensiList(prev => (Array.isArray(prev) ? prev : []).filter(p => ![masukId, keluarId].includes(String(p.id))));
+            setKlaimList((prev) => (Array.isArray(prev) ? prev : []).filter(item => String(item.id) !== String(claim.id)));
+            if (!silent) showToast('Klaim ditolak dan dihapus.');
+            return true;
+          }
+
+          if (!claimDate) throw new Error('Tanggal klaim tidak valid.');
+          const selectedShift = (Array.isArray(shiftList) ? shiftList : []).find(s => String(s.nama_shift || '') === String(claim.shift_nama || ''));
+          const shiftMasuk = String(claim.shift_jam_masuk || selectedShift?.jam_masuk || '08:00').slice(0, 8);
+          const shiftPulang = String(claim.shift_jam_pulang || selectedShift?.jam_pulang || '16:00').slice(0, 8);
+          const toTime = value => value.length === 5 ? `${value}:00` : value;
+          const nowIso = new Date().toISOString();
+
+          // Periksa apakah catatan masuk yang sudah ada berasal dari klaim versi lama.
+          // Catatan klaim parsial boleh diperbaiki; presensi normal tidak boleh diduplikasi.
+          const { data: existingRows, error: checkError } = await client.from('presensi')
+            .select('*').eq('karyawan_id', claim.karyawan_id).eq('tanggal', claimDate);
+          if (checkError) throw checkError;
+          const existingMasuk = (existingRows || []).find(p => p.tipe === 'masuk');
+          const existingIsClaim = existingMasuk && (String(existingMasuk.id) === masukId || String(existingMasuk.lokasi_nama || '').toLowerCase().includes('klaim kehadiran'));
+          if (existingMasuk && !existingIsClaim) {
+            throw new Error('Sudah ada presensi masuk normal pada tanggal ini. Periksa Rekapan Harian agar tidak terjadi duplikasi.');
+          }
+
+          const common = {
+            karyawan_id: claim.karyawan_id,
+            karyawan_nama: claim.karyawan_nama,
+            divisi: claim.divisi || '',
+            status: 'Hadir',
+            shift_nama: claim.shift_nama || 'Shift tidak tercatat',
+            lokasi_nama: 'Klaim Kehadiran - Disetujui HR',
+            latitude: 0,
+            longitude: 0,
+            foto_url: '',
+            keterangan: 'Kehadiran diklaim karyawan dan disetujui HR.',
+            tanggal: claimDate,
+            created_at: nowIso
+          };
+          const attendanceRows = [
+            { ...common, id: masukId, tipe: 'masuk', jam: toTime(shiftMasuk) },
+            { ...common, id: keluarId, tipe: 'keluar', jam: toTime(shiftPulang) }
+          ];
+          const { error: upsertError } = await client.from('presensi').upsert(attendanceRows, { onConflict: 'id' });
+          if (upsertError) throw upsertError;
+
+          // Supabase constraint klaim_kehadiran_status_check menggunakan status enum
+          // berbahasa Inggris (Pending / Approved / Rejected). Simpan 'Approved' di DB,
+          // sedangkan label UI tetap ditampilkan sebagai 'Disetujui'.
+          const updated = { ...claim, status: 'Approved', catatan: 'Disetujui HR. Kehadiran tercatat sesuai shift pada Rekapan Harian.', diproses_at: nowIso };
+          const { error: updateClaimError } = await client.from('klaim_kehadiran').update({ status: 'Approved', catatan: updated.catatan, diproses_at: nowIso }).eq('id', claim.id);
+          if (updateClaimError) throw updateClaimError;
+
+          if (typeof setPresensiList === 'function') setPresensiList(prev => {
+            const list = Array.isArray(prev) ? prev : [];
+            const filtered = list.filter(p => ![masukId, keluarId].includes(String(p.id)));
+            return [...attendanceRows, ...filtered];
+          });
+          setKlaimList((prev) => (Array.isArray(prev) ? prev : []).map(item => String(item.id) === String(claim.id) ? updated : item));
+          if (!silent) showToast('Klaim disetujui. Jam masuk dan pulang sesuai shift sudah tercatat, dan status klaim diperbarui.');
+          return true;
+        } catch (error) {
+          console.error('Gagal memproses klaim kehadiran:', error);
+          if (!silent) showToast(`Klaim gagal diproses: ${error?.message || 'periksa koneksi, skema, dan izin Supabase.'}`, 'error');
+          return false;
+        } finally {
+          setProcessingId(null);
+        }
+      };
+
+      const pendingClaims = (Array.isArray(klaimList) ? klaimList : []).filter(item => ['pending', 'menunggu', ''].includes(String(item.status || 'Pending').toLowerCase()));
+      const pendingCount = pendingClaims.length;
+      const visiblePendingIds = claims.filter(item => ['pending', 'menunggu', ''].includes(String(item.status || 'Pending').toLowerCase())).map(item => String(item.id));
+      const selectedPending = pendingClaims.filter(item => selectedClaimIds.includes(String(item.id)));
+      const toggleClaimSelection = (id) => setSelectedClaimIds(prev => prev.includes(String(id)) ? prev.filter(x => x !== String(id)) : [...prev, String(id)]);
+      const toggleVisiblePending = () => setSelectedClaimIds(prev => visiblePendingIds.every(id => prev.includes(id)) ? prev.filter(id => !visiblePendingIds.includes(id)) : [...new Set([...prev, ...visiblePendingIds])]);
+      const processBulk = async (action) => {
+        const targets = selectedPending.slice().sort((a, b) => String(a.karyawan_nama || '').localeCompare(String(b.karyawan_nama || ''), 'id', { sensitivity: 'base' }));
+        if (!targets.length) { showToast('Pilih minimal satu klaim berstatus Pending.', 'error'); return; }
+        const label = action === 'Disetujui' ? 'menyetujui' : 'menolak dan menghapus';
+        if (!await modernConfirm(`Yakin ingin ${label} ${targets.length} klaim yang dipilih?`)) return;
+        let success = 0;
+        let failed = 0;
+        for (const claim of targets) {
+          const ok = await processClaim(claim, action, true);
+          if (ok) success++; else failed++;
+        }
+        setSelectedClaimIds([]);
+        showToast(`Proses massal selesai: ${success} berhasil${failed ? `, ${failed} gagal` : ''}.`, failed ? 'error' : 'success');
+      };
+      return (
+        <div className="space-y-5">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div><h2 className="text-xl font-black text-slate-800">Klaim Kehadiran</h2><p className="text-xs text-slate-500 mt-1">Tinjau pengajuan kehadiran kemarin. Daftar karyawan diurutkan A–Z.</p></div>
+            <div className="px-4 py-2 rounded-xl bg-amber-50 text-amber-700 border border-amber-100 text-xs font-bold">{pendingCount} klaim menunggu</div>
+          </div>
+          <div className="flex flex-wrap gap-2">{['Pending', 'Disetujui', 'Semua'].map(status => <button key={status} onClick={() => { setFilterStatus(status); setSelectedClaimIds([]); }} className={`px-4 py-2 rounded-xl text-xs font-bold border transition ${filterStatus === status ? 'bg-violet-600 text-white border-violet-600' : 'bg-white text-slate-600 border-slate-200 hover:border-violet-300'}`}>{status}</button>)}</div>
+          <div className="flex flex-wrap items-center gap-2 rounded-xl border border-violet-100 bg-violet-50/60 p-3">
+            <span className="text-xs font-bold text-slate-600 mr-auto">{selectedPending.length} klaim Pending dipilih</span>
+            <button onClick={() => processBulk('Disetujui')} disabled={!selectedPending.length || !!processingId} className="px-3 py-2 rounded-lg bg-emerald-600 text-white text-xs font-bold disabled:opacity-40"><i className="fa-solid fa-check-double mr-1"></i>Setujui Massal</button>
+            <button onClick={() => processBulk('Ditolak')} disabled={!selectedPending.length || !!processingId} className="px-3 py-2 rounded-lg bg-white border border-rose-200 text-rose-600 text-xs font-bold disabled:opacity-40"><i className="fa-solid fa-xmark mr-1"></i>Tolak Massal</button>
+          </div>
+          <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+            <div className="overflow-x-auto"><table className="w-full text-left border-collapse text-xs min-w-[900px]">
+              <thead><tr className="bg-slate-50 text-slate-500 uppercase font-bold border-b border-slate-100 text-[10px] tracking-wider"><th className="p-3 text-center w-10"><input type="checkbox" aria-label="Pilih semua klaim Pending yang terlihat" checked={visiblePendingIds.length > 0 && visiblePendingIds.every(id => selectedClaimIds.includes(id))} onChange={toggleVisiblePending} disabled={!visiblePendingIds.length || !!processingId} className="h-4 w-4 accent-violet-600" /></th><th className="p-4 text-center w-14">No.</th><th className="p-4">Karyawan</th><th className="p-4">Tanggal Pengajuan Kehadiran</th><th className="p-4">Shift yang Dipilih</th><th className="p-4 text-center">Status</th><th className="p-4 text-center">Aksi</th></tr></thead>
+              <tbody className="divide-y divide-slate-100">
+                {claims.map((claim, index) => {
+                  const status = String(claim.status || 'Pending');
+                  const statusLabel = ['approved', 'disetujui', 'disetujui hr'].includes(status.toLowerCase()) ? 'Disetujui' : ['rejected', 'ditolak', 'ditolak hr'].includes(status.toLowerCase()) ? 'Ditolak' : status;
+                  const pending = ['pending', 'menunggu', ''].includes(status.toLowerCase());
+                  const shift = (Array.isArray(shiftList) ? shiftList : []).find(s => String(s.nama_shift || '') === String(claim.shift_nama || ''));
+                  const shiftTime = claim.shift_jam_masuk && claim.shift_jam_pulang ? `${formatShiftTimeDisplay(claim.shift_jam_masuk)} - ${formatShiftTimeDisplay(claim.shift_jam_pulang)}` : shift ? `${formatShiftTimeDisplay(shift.jam_masuk)} - ${formatShiftTimeDisplay(shift.jam_pulang)}` : '';
+                  return <tr key={claim.id} className="hover:bg-violet-50/30">
+                    <td className="p-3 text-center">{pending ? <input type="checkbox" aria-label={`Pilih klaim ${claim.karyawan_nama || "karyawan"}`} checked={selectedClaimIds.includes(String(claim.id))} onChange={() => toggleClaimSelection(claim.id)} disabled={!!processingId} className="h-4 w-4 accent-violet-600" /> : null}</td>
+                    <td className="p-4 text-center text-slate-500">{index + 1}</td>
+                    <td className="p-4"><div className="font-extrabold text-slate-800">{claim.karyawan_nama || 'Nama tidak tersedia'}</div><div className="text-[10px] text-slate-400 mt-1">{claim.divisi || '-'}</div></td>
+                    <td className="p-4 text-slate-600">{claim.tanggal_klaim ? formatDateDMY(claim.tanggal_klaim) : '-'}</td>
+                    <td className="p-4"><div className="font-bold text-slate-700">{claim.shift_nama || '-'}</div>{shiftTime && <div className="text-[10px] text-slate-400 mt-1">{shiftTime} WIB</div>}</td>
+                    <td className="p-4 text-center"><span className={`inline-flex px-3 py-1.5 rounded-full text-[10px] font-black ${pending ? 'bg-amber-50 text-amber-700' : status.toLowerCase().includes('setuju') ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>{statusLabel}</span></td>
+                    <td className="p-4"><div className="flex justify-center gap-2">{pending ? <><button disabled={processingId === claim.id} onClick={() => processClaim(claim, 'Disetujui')} className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-[10px] font-bold"><i className="fa-solid fa-check mr-1"></i>Setujui</button><button disabled={processingId === claim.id} onClick={() => processClaim(claim, 'Ditolak')} className="px-3 py-2 rounded-lg bg-white hover:bg-rose-50 border border-rose-200 text-rose-600 text-[10px] font-bold disabled:opacity-50"><i className="fa-solid fa-xmark mr-1"></i>Tolak</button></> : statusLabel === 'Disetujui' ? <button disabled={!!processingId} onClick={() => deleteApprovedClaim(claim)} className="px-3 py-2 rounded-lg bg-white hover:bg-rose-50 border border-rose-200 text-rose-600 text-[10px] font-bold disabled:opacity-50"><i className="fa-solid fa-trash-can mr-1"></i>Hapus Klaim</button> : <span className="text-[10px] text-slate-400">Selesai diproses</span>}</div></td>
+                  </tr>;
+                })}
+                {claims.length === 0 && <tr><td colSpan="7" className="p-10 text-center"><i className="fa-solid fa-clipboard-check text-3xl text-slate-300 mb-3"></i><p className="font-bold text-slate-600">Tidak ada klaim pada kategori ini.</p><p className="text-xs text-slate-400 mt-1">Pengajuan klaim baru akan muncul di tabel ini.</p></td></tr>}
+              </tbody>
+            </table></div>
+          </div>
         </div>
       );
     }
@@ -4849,7 +5171,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
         finally { setSavingCatalog(false); }
       };
       const deleteApp = async app => {
-        if (!window.confirm(`Hapus aplikasi "${app.label}" dari More Apps?`)) return;
+        if (!await modernConfirm(`Hapus aplikasi "${app.label}" dari More Apps?`)) return;
         try {
           await setMoreAppsCatalog(appItems.filter(a => a.label !== app.label));
           const nextAccess = { ...(moreAppsAccess || {}) }; delete nextAccess[app.label];
@@ -5681,8 +6003,8 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
         showToast(`Pengajuan lembur berhasil di-${newStatus === 'Approved' ? 'Setujui' : 'Tolak'}!`);
       };
 
-      const handleDelete = (id) => {
-        if (confirm('Apakah Anda yakin ingin menghapus data pengajuan lembur ini?')) {
+      const handleDelete = async (id) => {
+        if (await modernConfirm('Apakah Anda yakin ingin menghapus data pengajuan lembur ini?')) {
           setLemburList(prev => prev.filter(l => l.id !== id));
           showToast('Data pengajuan lembur dihapus.');
         }
@@ -6020,7 +6342,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
           let alm = {};
           try { alm = typeof k.alamat === 'string' ? JSON.parse(k.alamat) : (k.alamat || {}); } catch (e) { alm = { jalan: k.alamat || '' }; }
           setForm({
-            nama_lengkap: k.nama_lengkap || '', nik: String(k.nik || ''), lokasi_absen: Array.isArray(k.lokasi_absen) ? k.lokasi_absen.map(String) : lokasiList.map(l => String(l.id)), tgl_lahir: toDisplayDate(k.tgl_lahir), username: k.username || '',
+            nama_lengkap: k.nama_lengkap || '', nik: String(k.nik || ''), lokasi_absen: Array.isArray(k.lokasi_absen) ? (k.lokasi_absen.map(String).includes('*') && !k.lokasi_absen.map(String).some(id => id !== '*') ? ['*', ...lokasiList.map(l => String(l.id))] : k.lokasi_absen.map(String)) : lokasiList.map(l => String(l.id)), tgl_lahir: toDisplayDate(k.tgl_lahir), username: k.username || '',
             password: k.password || '', no_wa: k.no_wa || '', email: k.email || '', divisi: k.divisi || '',
             jabatan: k.jabatan || '', provinsi: alm.provinsi || '', kota: alm.kota || '',
             kecamatan: alm.kecamatan || '', desa: alm.desa || alm.kelurahan || '', jalan: alm.jalan || '',
@@ -6233,7 +6555,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                     </td>
                     <td className="p-4 text-center">
                       <button onClick={()=>openModal(k)} className="w-8 h-8 rounded-full bg-slate-50 text-indigo-500 hover:bg-indigo-50 mx-1" title="Edit Data Karyawan"><i className="fa-solid fa-pen-to-square"></i></button>
-                      <button onClick={()=>{setKaryawanList((Array.isArray(karyawanList) ? karyawanList : []).filter(x=>x.id!==k.id)); showToast('Karyawan dihapus!')}} className="w-8 h-8 rounded-full bg-slate-50 text-rose-500 hover:bg-rose-50 mx-1" title="Hapus Karyawan"><i className="fa-solid fa-trash"></i></button>
+                      <button onClick={async()=>{if(!await modernConfirm(`Yakin ingin menghapus data karyawan ${k.nama_lengkap || k.username || ''}? Tindakan ini akan menghapus data karyawan dari master.`, 'Hapus karyawan')) return; setKaryawanList((Array.isArray(karyawanList) ? karyawanList : []).filter(x=>String(x.id)!==String(k.id))); showToast('Permintaan penghapusan karyawan diproses.');}} className="w-8 h-8 rounded-full bg-slate-50 text-rose-500 hover:bg-rose-50 mx-1" title="Hapus Karyawan"><i className="fa-solid fa-trash"></i></button>
                     </td>
                   </tr>
                 ))}
@@ -6295,11 +6617,12 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                      </div>
                      <input type="email" placeholder="Alamat Email" value={form.email} onChange={e=>setForm({...form, email:e.target.value})} className="w-full bg-slate-50 border border-slate-200 text-xs rounded-2xl p-3 font-bold outline-none" required />
 
-                     <div className="bg-indigo-50/70 border border-indigo-100 rounded-2xl p-3 space-y-2">
-                       <div className="flex items-center justify-between gap-2">
-                         <label className="text-[10px] font-bold text-indigo-700 block">Master Lokasi Absen</label>
-                         <span className="text-[9px] text-indigo-500">Pilih lokasi yang diizinkan</span>
+                     <div className="bg-indigo-50/70 border border-indigo-100 rounded-2xl p-3 space-y-3">
+                       <div className="flex items-center justify-between gap-3">
+                         <div><label className="text-[11px] font-extrabold text-indigo-800 block">Master Lokasi Absen</label><span className="text-[9px] text-indigo-500">Atur pembatasan lokasi per karyawan</span></div>
+                         <label className="flex items-center gap-2 cursor-pointer shrink-0"><span className="text-[10px] font-bold text-slate-700">Unlock Lokasi</span><input type="checkbox" checked={(form.lokasi_absen || []).map(String).includes('*')} onChange={e=>setForm(prev=>{const ids=(prev.lokasi_absen||[]).map(String).filter(id=>id!=='*'); return {...prev, lokasi_absen:e.target.checked ? [...new Set(['*', ...ids])] : (ids.length ? ids : lokasiList.map(l=>String(l.id)))}})} className="h-4 w-4 accent-indigo-600" /></label>
                        </div>
+                       {(form.lokasi_absen || []).map(String).includes('*') && <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-[10px] leading-relaxed text-emerald-800"><b>Unlock Lokasi aktif.</b> Karyawan tetap wajib memilih salah satu lokasi yang dicentang dan peta/GPS tetap tampil, tetapi boleh melanjutkan presensi dari luar radius kantor. Lokasi yang dicentang di bawah tetap menjadi pilihan karyawan.</div>}
                        {lokasiList.length ? (
                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                            {[...lokasiList].sort((a,b)=>String(a.nama_lokasi||'').localeCompare(String(b.nama_lokasi||''),'id')).map(loc => {
@@ -6311,7 +6634,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                            })}
                          </div>
                        ) : <p className="text-[10px] text-amber-600">Belum ada lokasi. Tambahkan lokasi terlebih dahulu di menu Master Lokasi.</p>}
-                       <p className="text-[9px] text-slate-500">Lokasi yang dipilih akan menjadi pilihan lokasi absen karyawan ini.</p>
+                       <p className="text-[9px] text-slate-500">Lokasi yang dicentang menjadi pilihan lokasi absen karyawan ini. Unlock Lokasi hanya menonaktifkan kewajiban berada dalam radius.</p>
                      </div>
 
                      <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3 space-y-2">
@@ -6590,7 +6913,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
       return match ? match[1].padStart(5, '0') : String(value ?? '');
     };
 
-    function MasterShiftView({ shiftList, setShiftList, toleransiMenit, setToleransiMenit, showToast }) {
+    function MasterShiftView({ shiftList, setShiftList, divisiList, setDivisiList, toleransiMenit, setToleransiMenit, showToast }) {
       const [showModal, setShowModal] = useState(false);
       const [editingId, setEditingId] = useState(null);
       const [form, setForm] = useState({ nama_shift: '', jam_masuk: '08:00', jam_pulang: '17:00' });
@@ -6666,7 +6989,17 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
           jam_pulang: form.jam_pulang
         };
         if(editingId) {
-          setShiftList(shiftList.map(item => item.id === editingId ? { ...item, ...cleanForm } : item));
+          const previousShift = shiftList.find(item => String(item.id) === String(editingId));
+          const previousName = String(previousShift?.nama_shift || '').trim();
+          const nextName = cleanForm.nama_shift;
+          setShiftList(shiftList.map(item => String(item.id) === String(editingId) ? { ...item, ...cleanForm } : item));
+          // Jika nama shift diganti, perbarui semua referensi divisi agar tidak menyimpan nama lama.
+          if (previousName && previousName !== nextName) {
+            setDivisiList((Array.isArray(divisiList) ? divisiList : []).map(divisi => ({
+              ...divisi,
+              shifts: (Array.isArray(divisi.shifts) ? divisi.shifts : []).map(name => String(name).trim() === previousName ? nextName : name).filter((name, index, arr) => arr.indexOf(name) === index)
+            })));
+          }
         } else {
           setShiftList([...shiftList, { id: 'sh-' + Date.now(), ...cleanForm }]);
         }
@@ -6758,7 +7091,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                       <button onClick={()=>openModal(item)} className="w-8 h-8 rounded-full bg-slate-50 text-indigo-500 hover:bg-indigo-50 mx-1">
                         <i className="fa-solid fa-pen-to-square"></i>
                       </button>
-                      <button onClick={()=>{setShiftList(shiftList.filter(x=>x.id!==item.id)); showToast('Shift dihapus')}} className="w-8 h-8 rounded-full bg-slate-50 text-rose-500 hover:bg-rose-50 mx-1">
+                      <button onClick={()=>{setShiftList(shiftList.filter(x=>String(x.id)!==String(item.id))); setDivisiList((Array.isArray(divisiList) ? divisiList : []).map(divisi=>({...divisi, shifts:(Array.isArray(divisi.shifts) ? divisi.shifts : []).filter(name=>String(name).trim()!==String(item.nama_shift).trim())}))); showToast('Shift dihapus dan referensi shift pada Master Divisi dibersihkan')}} className="w-8 h-8 rounded-full bg-slate-50 text-rose-500 hover:bg-rose-50 mx-1">
                         <i className="fa-solid fa-trash"></i>
                       </button>
                     </td>
@@ -6826,21 +7159,29 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
       const [editingId, setEditingId] = useState(null);
       const [form, setForm] = useState({ nama_divisi: '', shifts: [], allow_cuti: true });
 
-      const sortedList = [...divisiList].sort((a, b) => a.nama_divisi.localeCompare(b.nama_divisi));
+      const sortedList = [...divisiList].sort((a, b) => a.nama_divisi.localeCompare(b.nama_divisi, 'id'));
+      const sortedShiftList = [...(Array.isArray(shiftList) ? shiftList : [])].sort((a, b) => {
+        const toMinutes = (value) => {
+          const match = String(value || '').match(/^(\d{1,2}):(\d{2})/);
+          return match ? Number(match[1]) * 60 + Number(match[2]) : Number.MAX_SAFE_INTEGER;
+        };
+        return toMinutes(a.jam_masuk) - toMinutes(b.jam_masuk) || String(a.nama_shift || '').localeCompare(String(b.nama_shift || ''), 'id');
+      });
+      const validShiftNames = new Set(sortedShiftList.map(s => String(s.nama_shift || '').trim()));
 
       const openModal = (item = null) => {
         if(item) {
           setEditingId(item.id);
           setForm({ 
             nama_divisi: item.nama_divisi, 
-            shifts: item.shifts || [], 
+            shifts: (item.shifts || []).filter(name => (Array.isArray(shiftList) ? shiftList : []).some(s => String(s.nama_shift || '').trim() === String(name).trim())), 
             allow_cuti: item.allow_cuti !== false 
           });
         } else {
           setEditingId(null);
           setForm({ 
             nama_divisi: '', 
-            shifts: shiftList[0] ? [shiftList[0].nama_shift] : [], 
+            shifts: sortedShiftList[0] ? [sortedShiftList[0].nama_shift] : [], 
             allow_cuti: true 
           });
         }
@@ -6900,12 +7241,13 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                     <td className="p-4 font-bold text-slate-800">{item.nama_divisi}</td>
                     <td className="p-4">
                       <div className="flex flex-wrap gap-1">
-                        {item.shifts && item.shifts.length > 0 ? (
-                          item.shifts.map((s, idx) => (
-                            <span key={idx} className="px-2 py-0.5 rounded-full bg-violet-50 text-violet-700 text-[9px] font-bold">
-                              {s}
-                            </span>
-                          ))
+                        {item.shifts && item.shifts.filter(s => validShiftNames.has(String(s).trim())).length > 0 ? (
+                          item.shifts.filter(s => validShiftNames.has(String(s).trim())).map((s, idx) => {
+                            const shift = sortedShiftList.find(option => String(option.nama_shift || '').trim() === String(s).trim());
+                            return <span key={`${s}-${idx}`} className="px-2 py-0.5 rounded-full bg-violet-50 text-violet-700 text-[9px] font-bold">
+                              {s}{shift ? ` (${formatShiftTimeDisplay(shift.jam_masuk)})` : ''}
+                            </span>;
+                          })
                         ) : (
                           <span className="text-slate-400 text-[10px]">-</span>
                         )}
@@ -6950,7 +7292,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                   <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3">
                     <label className="text-[10px] font-bold text-slate-400 block mb-2">Shift yang Berlaku</label>
                     <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
-                      {shiftList.map(s => (
+                      {sortedShiftList.map(s => (
                         <label key={s.id} className="flex items-center space-x-2 text-xs font-semibold text-slate-700 cursor-pointer p-1.5 rounded-xl hover:bg-white transition">
                           <input 
                             type="checkbox" 
@@ -6958,7 +7300,8 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                             onChange={() => toggleShiftSelection(s.nama_shift)}
                             className="rounded text-violet-600 focus:ring-violet-500" 
                           />
-                          <span className="text-[11px]">{s.nama_shift}</span>
+                          <span className="text-[11px] flex-1">{s.nama_shift}</span>
+                          <span className="text-[10px] font-mono-numbers text-slate-400">{formatShiftTimeDisplay(s.jam_masuk)}–{formatShiftTimeDisplay(s.jam_pulang)}</span>
                         </label>
                       ))}
                     </div>
@@ -6994,7 +7337,8 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
       const [editingId, setEditingId] = useState(null);
       const [form, setForm] = useState({ nama_jabatan: '', divisi: divisiList[0]?.nama_divisi ? [divisiList[0].nama_divisi] : [] });
 
-      const sortedList = [...jabatanList].sort((a, b) => (a.nama_jabatan || '').localeCompare(b.nama_jabatan || ''));
+      const sortedList = [...jabatanList].sort((a, b) => (a.nama_jabatan || '').localeCompare(b.nama_jabatan || '', 'id'));
+      const sortedDivisiList = [...(Array.isArray(divisiList) ? divisiList : [])].sort((a, b) => String(a.nama_divisi || '').localeCompare(String(b.nama_divisi || ''), 'id'));
       const getDivisions = (value) => Array.isArray(value)
         ? value.filter(Boolean)
         : String(value || '').split('|').map(v => v.trim()).filter(Boolean);
@@ -7110,7 +7454,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                     </div>
                     <p className="text-[10px] text-slate-400 mb-3">Pilih satu atau beberapa divisi untuk jabatan ini.</p>
                     <div className="space-y-1.5 max-h-56 overflow-y-auto">
-                      {divisiList.map(d => {
+                      {sortedDivisiList.map(d => {
                         const checked = getDivisions(form.divisi).includes(d.nama_divisi);
                         return (
                           <label key={d.id || d.nama_divisi} className={`flex items-center gap-3 rounded-xl p-3 cursor-pointer border transition ${checked ? 'bg-violet-50 border-violet-200' : 'bg-white border-slate-100 hover:border-slate-200'}`}>
@@ -7207,12 +7551,12 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
         setShowModal(false);
       };
 
-      const handleDelete = (id, nama) => {
+      const handleDelete = async (id, nama) => {
         if (adminList.length <= 1) {
           showToast('Tidak dapat menghapus admin terakhir!', 'error');
           return;
         }
-        if (confirm(`Hapus akun admin "${nama}"?`)) {
+        if (await modernConfirm(`Hapus akun admin "${nama}"?`)) {
           setAdminList(prev => prev.filter(a => a.id !== id));
           showToast('Akun admin berhasil dihapus.');
         }
@@ -7445,8 +7789,8 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
         setShowModal(false);
       };
 
-      const handleDelete = (id, judul) => {
-        if (confirm(`Hapus pengumuman "${judul}"?`)) {
+      const handleDelete = async (id, judul) => {
+        if (await modernConfirm(`Hapus pengumuman "${judul}"?`)) {
           setPengumumanList(prev => prev.filter(p => p.id !== id));
           showToast('Pengumuman berhasil dihapus.');
         }
