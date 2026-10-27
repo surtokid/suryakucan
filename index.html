@@ -3963,6 +3963,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
         setDateDraftHarian(formatDateDMY(selectedDate));
       }, [selectedDate]);
       const [filterStatusHarian, setFilterStatusHarian] = useState('Semua');
+      const [searchHarian, setSearchHarian] = useState('');
       const kalenderHarianRef = useRef(null);
       const [previewPhotoUrl, setPreviewPhotoUrl] = useState(null);
       const [statusEvidenceModal, setStatusEvidenceModal] = useState(null);
@@ -4370,9 +4371,11 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                     acc[status] = karyawanList.filter(k => statusFor(k) === status).length;
                     return acc;
                   }, {});
+                  const queryHarian = searchHarian.trim().toLocaleLowerCase('id');
                   const visibleEmployees = [...karyawanList]
                     .filter(k => filterStatusHarian === 'Semua' || statusFor(k) === filterStatusHarian)
-                    .sort((a, b) => a.nama_lengkap.localeCompare(b.nama_lengkap));
+                    .filter(k => !queryHarian || [k.nama_lengkap, k.nik, k.divisi, k.jabatan, k.username].some(value => String(value || '').toLocaleLowerCase('id').includes(queryHarian)))
+                    .sort((a, b) => String(a.nama_lengkap || '').localeCompare(String(b.nama_lengkap || ''), 'id'));
                   return <>
                     <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3">
                       {statusFilters.map(status => {
@@ -4407,6 +4410,14 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                       </div>
                     )}
                     <div className="bg-white rounded-[2rem] border border-slate-100 shadow-sm overflow-hidden">
+                      <div className="p-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="relative flex-1 max-w-lg">
+                          <i className="fa-solid fa-magnifying-glass absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
+                          <input type="text" value={searchHarian} onChange={e => setSearchHarian(e.target.value)} placeholder="Cari nama karyawan, NIK, divisi, atau jabatan..." className="w-full bg-slate-50 border border-slate-200 rounded-2xl pl-9 pr-10 py-3 text-xs font-semibold outline-none focus:border-violet-500" aria-label="Pencarian rekapan harian" />
+                          {searchHarian && <button type="button" onClick={() => setSearchHarian('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700" aria-label="Hapus pencarian"><i className="fa-solid fa-xmark"></i></button>}
+                        </div>
+                        <div className="text-[11px] font-bold text-slate-500">Ditampilkan: <span className="text-violet-600 font-mono-numbers">{visibleEmployees.length}</span> karyawan</div>
+                      </div>
                       <div className="overflow-x-auto">
                     <table className="w-full text-left border-collapse text-xs">
                       <thead>
@@ -4567,6 +4578,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                               </tr>
                             );
                         })}
+                        {visibleEmployees.length === 0 && <tr><td colSpan={9} className="p-8 text-center text-xs font-semibold text-slate-400">Tidak ada karyawan yang cocok dengan pencarian atau filter ini.</td></tr>}
                       </tbody>
                     </table>
                       </div>
@@ -5146,11 +5158,23 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
       };
       const [selectedApp, setSelectedApp] = useState(appItems[0]?.label || '');
       const [search, setSearch] = useState('');
+      const [divisionFilter, setDivisionFilter] = useState('Semua Divisi');
       const [draftIds, setDraftIds] = useState((moreAppsAccess?.[appItems[0]?.label] || []).map(String));
       const [saving, setSaving] = useState(false);
-      useEffect(() => { setDraftIds((moreAppsAccess?.[selectedApp] || []).map(String)); }, [selectedApp, moreAppsAccess]);
-      const filtered = karyawanList.filter(k => `${k.nama_lengkap || ''} ${k.nik || ''} ${k.divisi || ''} ${k.jabatan || ''}`.toLowerCase().includes(search.toLowerCase()));
-      const setAll = checked => setDraftIds(checked ? karyawanList.map(k => String(k.id)) : []);
+      // Gunakan signature akses aplikasi terpilih, bukan seluruh objek moreAppsAccess.
+      // Ini mencegah draft checkbox tertimpa/reset ketika state akses aplikasi lain berubah.
+      const selectedAccessKey = (Array.isArray(moreAppsAccess?.[selectedApp]) ? moreAppsAccess[selectedApp] : []).map(String).sort().join('|');
+      useEffect(() => { setDraftIds((Array.isArray(moreAppsAccess?.[selectedApp]) ? moreAppsAccess[selectedApp] : []).map(String)); }, [selectedApp, selectedAccessKey]);
+      const divisionOptions = [...new Set(karyawanList.map(k => String(k.divisi || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'id', { sensitivity: 'base' }));
+      const sortedKaryawan = [...karyawanList].sort((a, b) => String(a.nama_lengkap || 'Tanpa nama').localeCompare(String(b.nama_lengkap || 'Tanpa nama'), 'id', { sensitivity: 'base' }));
+      const filtered = sortedKaryawan.filter(k => (divisionFilter === 'Semua Divisi' || String(k.divisi || '').trim() === divisionFilter) && `${k.nama_lengkap || ''} ${k.nik || ''} ${k.divisi || ''} ${k.jabatan || ''}`.toLowerCase().includes(search.toLowerCase()));
+      // Select/Unselect hanya memengaruhi karyawan yang sedang terlihat setelah filter divisi dan pencarian.
+      const setAll = checked => setDraftIds(prev => {
+        const visibleIds = filtered.map(k => String(k.id));
+        if (checked) return [...new Set([...prev.map(String), ...visibleIds])];
+        const visibleSet = new Set(visibleIds);
+        return prev.map(String).filter(id => !visibleSet.has(id));
+      });
       const save = async () => {
         if (typeof setMoreAppsAccess !== 'function') { showToast('Fungsi penyimpanan pengaturan tidak tersedia.', 'error'); return; }
         setSaving(true);
@@ -5177,7 +5201,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
           {showAppForm && <div className="fixed inset-0 z-[150] flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm"><div className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl"><div className="mb-5 flex items-center justify-between"><div><h3 className="text-lg font-extrabold text-slate-900">{editingLabel ? 'Edit Aplikasi' : 'Buat Aplikasi Baru'}</h3><p className="mt-1 text-xs text-slate-500">Tombol karyawan otomatis menggunakan popup Coming Soon.</p></div><button onClick={() => setShowAppForm(false)} className="h-9 w-9 rounded-full bg-slate-100 text-slate-500"><i className="fa-solid fa-xmark"></i></button></div><div className="space-y-4"><label className="block text-xs font-bold text-slate-600">Nama aplikasi<input value={appForm.label} onChange={e => setAppForm(v => ({...v,label:e.target.value}))} className="mt-1 w-full rounded-xl border border-slate-200 p-3 text-sm outline-none focus:border-violet-400" placeholder="Contoh: Cek Promo" /></label><label className="block text-xs font-bold text-slate-600">Deskripsi aplikasi<textarea value={appForm.description} onChange={e => setAppForm(v => ({...v,description:e.target.value}))} className="mt-1 w-full rounded-xl border border-slate-200 p-3 text-sm outline-none focus:border-violet-400" rows="2" placeholder="Jelaskan fungsi aplikasi" /></label><label className="block text-xs font-bold text-slate-600">Ikon Font Awesome<input value={appForm.icon} onChange={e => setAppForm(v => ({...v,icon:e.target.value}))} className="mt-1 w-full rounded-xl border border-slate-200 p-3 text-sm outline-none focus:border-violet-400" placeholder="fa-layer-group" /><span className="mt-1 block text-[10px] text-slate-400">Masukkan nama kelas ikon, misalnya fa-box, fa-tags, atau fa-calculator.</span></label><label className="block text-xs font-bold text-slate-600">URL tujuan aplikasi (opsional)<input type="url" value={appForm.url || ''} onChange={e => setAppForm(v => ({...v,url:e.target.value}))} className="mt-1 w-full rounded-xl border border-slate-200 p-3 text-sm outline-none focus:border-violet-400" placeholder="https://contoh-domain.com" /><span className="mt-1 block text-[10px] text-slate-400">Jika diisi, tombol More Apps akan membuka URL ini. Jika dikosongkan, tombol menampilkan popup Coming Soon.</span></label><div className="flex items-center gap-3 rounded-xl bg-violet-50 p-3 text-violet-700"><i className={`fa-solid ${appForm.icon || 'fa-layer-group'} text-xl`}></i><span className="text-xs font-bold">{appForm.label || 'Pratinjau ikon aplikasi'}</span></div><div className="flex gap-2 pt-2"><button type="button" disabled={savingCatalog} onClick={() => setShowAppForm(false)} className="flex-1 rounded-full bg-slate-100 py-3 text-xs font-bold text-slate-600">Batal</button><button type="button" disabled={savingCatalog} onClick={saveApp} className="flex-1 rounded-full bg-violet-600 py-3 text-xs font-bold text-white disabled:opacity-50">{savingCatalog ? 'Menyimpan...' : 'Simpan Aplikasi'}</button></div></div></div></div>}
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(240px,0.8fr)_minmax(320px,1.2fr)]">
             <section className="rounded-3xl border border-slate-100 bg-white p-4 shadow-sm"><h3 className="mb-3 text-sm font-extrabold text-slate-800">Pilih Menu / Aplikasi</h3><div className="space-y-2">{appItems.map(app => <button key={app.label} onClick={() => setSelectedApp(app.label)} className={`flex w-full items-center gap-3 rounded-2xl border p-3 text-left transition ${selectedApp === app.label ? 'border-violet-200 bg-violet-50 text-violet-800' : 'border-slate-100 hover:bg-slate-50 text-slate-600'}`}><span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${selectedApp === app.label ? 'bg-violet-600 text-white' : 'bg-slate-100 text-slate-500'}`}><i className={`fa-solid ${app.icon}`}></i></span><span className="min-w-0 flex-1"><span className="block text-xs font-extrabold">{app.label}</span><span className="mt-0.5 block text-[10px] text-slate-500">{app.description}</span></span><i className={`fa-solid fa-chevron-right text-[10px] ${selectedApp === app.label ? 'text-violet-500' : 'text-slate-300'}`}></i></button>)}</div></section>
-            <section className="overflow-hidden rounded-3xl border border-slate-100 bg-white shadow-sm"><div className="border-b border-slate-100 p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-base font-extrabold text-slate-800">Daftar Karyawan</h3><p className="mt-1 text-xs text-slate-500">Akses untuk: <strong>{selectedApp}</strong></p></div><span className="rounded-full bg-violet-50 px-3 py-1.5 text-xs font-extrabold text-violet-700">{draftIds.length} dipilih</span></div><div className="mt-4"><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Cari nama, NIK, divisi..." className="w-full rounded-xl border border-slate-200 px-4 py-3 text-xs outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-100" /></div><div className="mt-3 flex flex-wrap gap-2"><button type="button" onClick={() => setAll(true)} className="rounded-full border border-violet-200 bg-violet-50 px-3 py-2 text-[11px] font-bold text-violet-700 hover:bg-violet-100"><i className="fa-solid fa-check-double mr-1"></i>Select All</button><button type="button" onClick={() => setAll(false)} className="rounded-full border border-slate-200 bg-white px-3 py-2 text-[11px] font-bold text-slate-600 hover:bg-slate-50"><i className="fa-solid fa-xmark mr-1"></i>Unselect All</button></div></div><div className="max-h-[52vh] overflow-y-auto p-3">{filtered.map(k => { const checked = draftIds.includes(String(k.id)); return <label key={k.id} className={`mb-1 flex cursor-pointer items-center gap-3 rounded-xl p-3 transition ${checked ? 'bg-violet-50' : 'hover:bg-slate-50'}`}><input type="checkbox" checked={checked} onChange={e => setDraftIds(prev => e.target.checked ? [...new Set([...prev, String(k.id)])] : prev.filter(id => id !== String(k.id)))} className="h-4 w-4 accent-violet-600"/><span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold text-slate-800">{k.nama_lengkap || 'Tanpa nama'}</span><span className="mt-0.5 block truncate text-[10px] text-slate-500">{[k.nik, k.divisi, k.jabatan].filter(Boolean).join(' • ') || 'Data karyawan'}</span></span></label>; })}{filtered.length === 0 && <p className="p-6 text-center text-xs text-slate-400">Karyawan tidak ditemukan.</p>}</div><div className="border-t border-slate-100 bg-slate-50 p-4"><button disabled={saving} onClick={save} className="flex w-full items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-3 text-xs font-extrabold text-white shadow-sm transition hover:bg-violet-700 disabled:opacity-60"><i className={`fa-solid ${saving ? 'fa-spinner fa-spin' : 'fa-floppy-disk'}`}></i>{saving ? 'Menyimpan...' : 'Simpan Pengaturan Akses'}</button></div></section>
+            <section className="overflow-hidden rounded-3xl border border-slate-100 bg-white shadow-sm"><div className="border-b border-slate-100 p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-base font-extrabold text-slate-800">Daftar Karyawan</h3><p className="mt-1 text-xs text-slate-500">Akses untuk: <strong>{selectedApp}</strong></p></div><span className="rounded-full bg-violet-50 px-3 py-1.5 text-xs font-extrabold text-violet-700">{draftIds.length} dipilih</span></div><div className="mt-4"><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Cari nama, NIK, divisi..." className="w-full rounded-xl border border-slate-200 px-4 py-3 text-xs outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-100" /></div><div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end"><label className="block text-[11px] font-bold text-slate-600">Filter Divisi<select value={divisionFilter} onChange={e => setDivisionFilter(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-100"><option value="Semua Divisi">Semua Divisi</option>{divisionOptions.map(divisi => <option key={divisi} value={divisi}>{divisi}</option>)}</select></label><div className="flex flex-wrap gap-2"><button type="button" onClick={() => setAll(true)} className="rounded-full border border-violet-200 bg-violet-50 px-3 py-2 text-[11px] font-bold text-violet-700 hover:bg-violet-100"><i className="fa-solid fa-check-double mr-1"></i>Select All</button><button type="button" onClick={() => setAll(false)} className="rounded-full border border-slate-200 bg-white px-3 py-2 text-[11px] font-bold text-slate-600 hover:bg-slate-50"><i className="fa-solid fa-xmark mr-1"></i>Unselect All</button></div></div></div><div className="max-h-[52vh] overflow-y-auto p-3">{filtered.map(k => { const checked = draftIds.includes(String(k.id)); return <label key={k.id} className={`mb-1 flex cursor-pointer items-center gap-3 rounded-xl p-3 transition ${checked ? 'bg-violet-50' : 'hover:bg-slate-50'}`}><input type="checkbox" checked={checked} onChange={e => setDraftIds(prev => e.target.checked ? [...new Set([...prev, String(k.id)])] : prev.filter(id => id !== String(k.id)))} className="h-4 w-4 accent-violet-600"/><span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold text-slate-800">{k.nama_lengkap || 'Tanpa nama'}</span><span className="mt-0.5 block truncate text-[10px] text-slate-500">{[k.nik, k.divisi, k.jabatan].filter(Boolean).join(' • ') || 'Data karyawan'}</span></span></label>; })}{filtered.length === 0 && <p className="p-6 text-center text-xs text-slate-400">Karyawan tidak ditemukan.</p>}</div><div className="border-t border-slate-100 bg-slate-50 p-4"><button disabled={saving} onClick={save} className="flex w-full items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-3 text-xs font-extrabold text-white shadow-sm transition hover:bg-violet-700 disabled:opacity-60"><i className={`fa-solid ${saving ? 'fa-spinner fa-spin' : 'fa-floppy-disk'}`}></i>{saving ? 'Menyimpan...' : 'Simpan Pengaturan Akses'}</button></div></section>
           </div>
         </div>
       );
@@ -6191,6 +6215,8 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
       lokasiList = Array.isArray(lokasiList) ? lokasiList : [];
       const [showModal, setShowModal] = useState(false);
       const [editingId, setEditingId] = useState(null);
+      const [searchKaryawan, setSearchKaryawan] = useState('');
+      const [showIncompleteOnly, setShowIncompleteOnly] = useState(false);
       const [savingPendaftaran, setSavingPendaftaran] = useState(false);
       const handleTogglePendaftaran = async (enabled) => {
         if (!setPendaftaranKaryawanAktif) return;
@@ -6285,6 +6311,12 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
         return requiredValues.some(value => value === null || value === undefined || String(value).trim() === '');
       };
       const sortedKaryawanList = [...(Array.isArray(karyawanList) ? karyawanList : [])].filter(Boolean).sort((a, b) => String(a?.nama_lengkap || '').localeCompare(String(b?.nama_lengkap || ''), 'id'));
+      const incompleteKaryawanCount = sortedKaryawanList.filter(isKaryawanDataIncomplete).length;
+      const queryKaryawan = searchKaryawan.trim().toLocaleLowerCase('id');
+      const filteredKaryawanList = sortedKaryawanList.filter(k =>
+        (!showIncompleteOnly || isKaryawanDataIncomplete(k)) &&
+        (!queryKaryawan || [k.nama_lengkap, k.nik, k.username, k.email, k.no_wa, k.divisi, k.jabatan].some(value => String(value || '').toLocaleLowerCase('id').includes(queryKaryawan)))
+      );
 
       const availableJabatan = useMemo(() => {
         if (!form.divisi) return jabatanList;
@@ -6459,6 +6491,21 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
             </button>
           </div>
           <div className="bg-white rounded-[2rem] border border-slate-100 shadow-sm overflow-hidden">
+            <div className="p-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="relative flex-1 max-w-lg">
+                <i className="fa-solid fa-magnifying-glass absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
+                <input type="text" value={searchKaryawan} onChange={e => setSearchKaryawan(e.target.value)} placeholder="Cari nama karyawan, NIK, username, divisi, atau jabatan..." className="w-full bg-slate-50 border border-slate-200 rounded-2xl pl-9 pr-10 py-3 text-xs font-semibold outline-none focus:border-violet-500" aria-label="Pencarian master karyawan" />
+                {searchKaryawan && <button type="button" onClick={() => setSearchKaryawan('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700" aria-label="Hapus pencarian"><i className="fa-solid fa-xmark"></i></button>}
+              </div>
+              <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+                <button type="button" onClick={() => setShowIncompleteOnly(value => !value)} className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2.5 text-[11px] font-extrabold transition ${showIncompleteOnly ? 'border-rose-300 bg-rose-100 text-rose-700 shadow-sm' : 'border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100'}`} aria-pressed={showIncompleteOnly}>
+                  <i className={`fa-solid ${showIncompleteOnly ? 'fa-filter-circle-xmark' : 'fa-filter'}`}></i>
+                  {showIncompleteOnly ? 'Tampilkan Semua' : 'Perlu Dilengkapi'}
+                  <span className={`rounded-full px-2 py-0.5 text-[10px] ${showIncompleteOnly ? 'bg-white/80 text-rose-700' : 'bg-rose-200/70 text-rose-700'}`}>{incompleteKaryawanCount}</span>
+                </button>
+                <div className="text-[11px] font-bold text-slate-500">Total: <span className="text-violet-600 font-mono-numbers">{filteredKaryawanList.length}</span> / {sortedKaryawanList.length} karyawan</div>
+              </div>
+            </div>
             <table className="w-full text-left border-collapse text-xs">
               <thead>
                 <tr className="bg-slate-50 text-slate-400 uppercase font-bold border-b border-slate-100 text-[10px] tracking-wider">
@@ -6471,7 +6518,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-50">
-                {sortedKaryawanList.map((k, i) => (
+                {filteredKaryawanList.map((k, i) => (
                   <tr key={k.id} title={isKaryawanDataIncomplete(k) ? 'Data karyawan belum lengkap. Lengkapi data wajib melalui tombol Edit.' : 'Data karyawan lengkap'} className={`transition ${isKaryawanDataIncomplete(k) ? 'bg-rose-500/[0.09] backdrop-blur-sm border-l-4 border-rose-400 hover:bg-rose-500/[0.15]' : 'hover:bg-slate-50/50'}`}>
                     <td className="p-4 text-center font-mono-numbers text-slate-400 font-bold">{i + 1}</td>
                     
@@ -6523,6 +6570,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                     </td>
                   </tr>
                 ))}
+                {filteredKaryawanList.length === 0 && <tr><td colSpan={6} className="p-8 text-center text-xs font-semibold text-slate-400">{showIncompleteOnly && !queryKaryawan ? 'Tidak ada karyawan yang perlu dilengkapi datanya.' : 'Tidak ada karyawan yang cocok dengan pencarian.'}</td></tr>}
               </tbody>
             </table>
           </div>
