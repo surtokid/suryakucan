@@ -3428,6 +3428,22 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
       const [searchNama, setSearchNama] = React.useState('');
       const todayStr = getLocalDateKey();
 
+      // Index presensi sekali agar daftar rekan tidak melakukan pencarian berulang untuk setiap karyawan.
+      const presensiMasukByKaryawan = useMemo(() => {
+        const map = new Map();
+        presensiList.forEach(p => {
+          if (p.tanggal === todayStr && p.tipe === 'masuk') map.set(String(p.karyawan_id), p);
+        });
+        return map;
+      }, [presensiList, todayStr]);
+      const presensiKeluarByKaryawan = useMemo(() => {
+        const map = new Map();
+        presensiList.forEach(p => {
+          if (p.tanggal === todayStr && p.tipe === 'keluar') map.set(String(p.karyawan_id), p);
+        });
+        return map;
+      }, [presensiList, todayStr]);
+
       // Hitung jumlah rekan untuk masing-masing filter secara real-time hari ini
       const counts = useMemo(() => {
         let masuk = 0;
@@ -3438,7 +3454,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
         let cuti = 0;
 
         karyawanList.forEach(k => {
-          const att = presensiList.find(p => p.karyawan_id === k.id && p.tanggal === todayStr && p.tipe === 'masuk');
+          const att = presensiMasukByKaryawan.get(String(k.id));
           const status = att ? att.status : 'Belum Absen';
 
           if (status === 'Hadir' || status === 'Terlambat') masuk++;
@@ -3467,7 +3483,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
         const query = searchNama.trim().toLocaleLowerCase('id-ID');
         if (query && !nama.includes(query)) return false;
 
-        const att = presensiList.find(p => String(p.karyawan_id) === String(k.id) && p.tanggal === todayStr && p.tipe === 'masuk');
+        const att = presensiMasukByKaryawan.get(String(k.id));
         const currentStatus = att ? att.status : 'Belum Absen';
         
         if (filterStatus === 'Semua') return true;
@@ -3477,7 +3493,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
       }).sort((a, b) => String(a.nama_lengkap || '').localeCompare(String(b.nama_lengkap || ''), 'id', { sensitivity: 'base' }));
 
       return (
-        <div className="p-5 space-y-4 pb-28">
+        <div className="p-5 space-y-4 pb-[8px] md:pb-6" style={{ scrollPaddingBottom: "8px" }}>
           <div className="flex justify-between items-center mb-2">
             <div>
               <h2 className="font-display font-bold text-lg text-slate-800">Status Rekan</h2>
@@ -3522,13 +3538,13 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
             ))}
           </div>
 
-          <div className="space-y-3">
+          <div className="space-y-2.5">
             {filteredList.length > 0 ? filteredList.map((k, index) => {
-              const att = presensiList.find(p => String(p.karyawan_id) === String(k.id) && p.tanggal === todayStr && p.tipe === 'masuk');
-              const pulangAtt = presensiList.find(p => String(p.karyawan_id) === String(k.id) && p.tanggal === todayStr && p.tipe === 'keluar');
+              const att = presensiMasukByKaryawan.get(String(k.id));
+              const pulangAtt = presensiKeluarByKaryawan.get(String(k.id));
               const sudahMasuk = !!att && ['Hadir', 'Terlambat'].includes(String(att.status || '').trim());
               return (
-                <div key={k.id} className="bg-white/90 backdrop-blur-xl p-4 rounded-3xl border border-slate-100 shadow-[0_4px_20px_rgb(0,0,0,0.03)]">
+                <div key={k.id} className={`bg-white p-3.5 rounded-2xl border border-slate-100 shadow-sm ${index === filteredList.length - 1 ? 'mb-0 scroll-mb-2' : ''}`} style={{ contentVisibility: 'auto', containIntrinsicSize: '104px', scrollMarginBottom: index === filteredList.length - 1 ? "8px" : undefined }}>
                   <div className="flex items-start gap-3 min-w-0">
                     <span className="w-5 shrink-0 pt-1 text-center text-[10px] font-bold text-slate-400">{index + 1}.</span>
                     <div className="w-11 h-11 shrink-0 rounded-full bg-slate-50 flex items-center justify-center overflow-hidden border border-slate-100">
@@ -3572,6 +3588,12 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                       </div>
                     </div>
                   </div>
+                  {index === filteredList.length - 1 && (
+                    <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-center gap-1.5 text-[10px] font-semibold text-slate-400" aria-label="Data rekan terakhir">
+                      <i className="fa-solid fa-circle-check text-emerald-500"></i>
+                      <span>Data rekan terakhir</span>
+                    </div>
+                  )}
                 </div>
               );
             }) : (
