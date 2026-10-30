@@ -1,4 +1,5 @@
-<!DOCTYPE html><html lang="id"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><title>SuryaKuCan</title><link rel="icon" type="image/png" href="./Logo%20SuryaKuCan.png"><link rel="apple-touch-icon" href="./Logo%20SuryaKuCan.png"><link rel="manifest" href="./manifest.json?v=suryakucan-v4"><meta name="theme-color" content="#ec4899"><meta name="application-name" content="SuryaKuCan"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="default"><meta name="apple-mobile-web-app-title" content="SuryaKuCan"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/><script src="https://cdn.tailwindcss.com"></script><script>
+<!DOCTYPE html><html lang="id"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><title>SuryaKuCan</title>
+  <!-- V31: status akun karyawan --><link rel="icon" type="image/png" href="./Logo%20SuryaKuCan.png"><link rel="apple-touch-icon" href="./Logo%20SuryaKuCan.png"><link rel="manifest" href="./manifest.json?v=suryakucan-v4"><meta name="theme-color" content="#ec4899"><meta name="application-name" content="SuryaKuCan"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="default"><meta name="apple-mobile-web-app-title" content="SuryaKuCan"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/><script src="https://cdn.tailwindcss.com"></script><script>
     tailwind.config = {
       theme: {
         extend: {
@@ -657,7 +658,18 @@ const DEFAULT_MORE_APPS = [
     useEffect(() => {
       if (authSession?.type !== 'karyawan' || currentUser?.id == null || !Array.isArray(karyawanList)) return;
       const freshCurrentUser = karyawanList.find(row => String(row.id) === String(currentUser.id));
-      if (!freshCurrentUser) return;
+      if (!freshCurrentUser || String(freshCurrentUser.status_akun || 'Aktif').toLowerCase() !== 'aktif') {
+        localStorage.removeItem('suryatokoku_user');
+        localStorage.removeItem('suryatokoku_session');
+        localStorage.removeItem('suryatokoku_is_admin');
+        setCurrentUser(null);
+        setAuthSession(null);
+        setIsAdmin(false);
+        setCurrentRoute('#karyawan');
+        if (window.location.hash !== '#karyawan') window.location.hash = '#karyawan';
+        showToast('Akun Anda telah dinonaktifkan oleh admin. Silakan hubungi HRD.', 'error');
+        return;
+      }
 
       const mergedUser = { ...currentUser, ...freshCurrentUser };
       // Hindari render berulang jika data sesi sudah sama dengan data master.
@@ -844,30 +856,31 @@ const DEFAULT_MORE_APPS = [
 
     const handleLoginKaryawan = async (identifier, password) => {
       const trimmedId = String(identifier || '').trim().toLowerCase();
-      const findUser = (list) => (Array.isArray(list) ? list : []).find(k =>
+      const matchesCredentials = (k) =>
         (((k.username || '').toString().trim().toLowerCase() === trimmedId) ||
          ((k.no_wa || '').toString().trim().toLowerCase() === trimmedId) ||
          ((k.email || '').toString().trim().toLowerCase() === trimmedId)) &&
-        String(k.password ?? '') === String(password ?? '')
-      );
+        String(k.password ?? '') === String(password ?? '');
 
-      // Cek cache state terlebih dahulu agar login tetap cepat.
-      let user = findUser(karyawanList);
-      // Jika tidak ditemukan, ambil data terbaru dari Supabase. Ini penting setelah
-      // pendaftaran baru agar karyawan tidak perlu me-refresh halaman secara manual.
-      if (!user) {
-        try {
-          const client = await getSupabaseClient();
-          const { data, error } = await client.from('master_karyawan').select('*');
-          if (error) throw error;
-          const latestList = Array.isArray(data) ? data : [];
-          setKaryawanList(latestList);
-          user = findUser(latestList);
-        } catch (error) {
-          console.error('Gagal menyegarkan data karyawan saat login:', error);
-          showToast('Data login belum dapat diperbarui dari server. Periksa koneksi lalu coba lagi.', 'error');
-          return { success: false, message: 'Gagal memuat data terbaru' };
-        }
+      // Selalu validasi terhadap database terbaru agar cache browser tidak bisa
+      // dipakai untuk masuk kembali setelah akun dinonaktifkan.
+      let user = null;
+      try {
+        const client = await getSupabaseClient();
+        const { data, error } = await client.from('master_karyawan').select('*');
+        if (error) throw error;
+        const latestList = Array.isArray(data) ? data : [];
+        setKaryawanList(latestList);
+        user = latestList.find(matchesCredentials) || null;
+      } catch (error) {
+        console.error('Gagal memverifikasi status akun karyawan:', error);
+        showToast('Tidak dapat memverifikasi akun ke server. Periksa koneksi lalu coba lagi.', 'error');
+        return { success: false, message: 'Gagal memverifikasi akun' };
+      }
+
+      if (user && String(user.status_akun || 'Aktif').toLowerCase() !== 'aktif') {
+        showToast('Akun Anda sedang dinonaktifkan. Silakan hubungi admin atau HRD.', 'error');
+        return { success: false, message: 'Akun dinonaktifkan' };
       }
 
       if (user) {
@@ -880,10 +893,10 @@ const DEFAULT_MORE_APPS = [
         navigateTo('#karyawan');
         showToast(`Selamat datang, ${user.nama_lengkap}!`);
         return { success: true };
-      } else {
-        showToast('Username/No.WA/Email atau password salah!', 'error');
-        return { success: false, message: 'Kredensial tidak cocok' };
       }
+
+      showToast('Username/No.WA/Email atau password salah!', 'error');
+      return { success: false, message: 'Kredensial tidak cocok' };
     };
 
     const handleLoginAdmin = (identifier, password) => {
@@ -6341,7 +6354,8 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
         kecamatan: '',
         desa: '',
         jalan: '',
-        foto_profil: ''
+        foto_profil: '',
+        status_akun: 'Aktif'
       });
 
       // Dropdown wilayah administratif Indonesia (Provinsi > Kabupaten/Kota > Kecamatan > Desa/Kelurahan)
@@ -6439,7 +6453,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
             password: k.password || '', no_wa: k.no_wa || '', email: k.email || '', divisi: k.divisi || '',
             jabatan: k.jabatan || '', provinsi: alm.provinsi || '', kota: alm.kota || '',
             kecamatan: alm.kecamatan || '', desa: alm.desa || alm.kelurahan || '', jalan: alm.jalan || '',
-            foto_profil: k.foto_profil || ''
+            foto_profil: k.foto_profil || '', status_akun: String(k.status_akun || 'Aktif').toLowerCase() === 'nonaktif' ? 'Nonaktif' : 'Aktif'
           });
           setShowModal(true);
           try {
@@ -6542,7 +6556,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
             }
           }
           const alamat = JSON.stringify({ provinsi: form.provinsi, kota: form.kota, kecamatan: form.kecamatan, desa: form.desa, jalan: form.jalan });
-          const cleanForm = { ...form, nik: nik || null, lokasi_absen: (form.lokasi_absen || []).map(String), tgl_lahir: tglLahirIso, no_wa: noWa, foto_profil: fotoProfilUrl };
+          const cleanForm = { ...form, status_akun: String(form.status_akun || 'Aktif') === 'Nonaktif' ? 'Nonaktif' : 'Aktif', nik: nik || null, lokasi_absen: (form.lokasi_absen || []).map(String), tgl_lahir: tglLahirIso, no_wa: noWa, foto_profil: fotoProfilUrl };
           if(editingId) {
             setKaryawanList(karyawanList.map(k => k.id === editingId ? { ...k, ...cleanForm, alamat } : k));
           } else {
@@ -6626,6 +6640,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                           <span className="shrink-0 text-[10px] font-mono-numbers text-slate-400">#{i + 1}</span>
                         </div>
                         {incomplete && <span className="inline-flex mt-1 items-center gap-1 rounded-full bg-rose-50 border border-rose-200 text-rose-700 px-2 py-1 text-[9px] font-extrabold"><i className="fa-solid fa-circle-exclamation"></i> Data belum lengkap</span>}
+                        <span className={`inline-flex mt-1 items-center gap-1 rounded-full px-2 py-1 text-[9px] font-extrabold ${String(k.status_akun || 'Aktif').toLowerCase() === 'nonaktif' ? 'bg-rose-50 text-rose-700 border border-rose-200' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'}`}><i className={`fa-solid ${String(k.status_akun || 'Aktif').toLowerCase() === 'nonaktif' ? 'fa-user-lock' : 'fa-user-check'}`}></i>{String(k.status_akun || 'Aktif').toLowerCase() === 'nonaktif' ? 'Akun Nonaktif' : 'Akun Aktif'}</span>
                         <div className="mt-1 text-[11px] text-slate-500 break-all">{k.email || k.no_wa || 'Email/WhatsApp belum diisi'}</div>
                         <div className="mt-1 text-[10px] text-slate-400">Username: <span className="font-mono-numbers text-slate-600 break-all">{k.username || 'Belum diisi'}</span></div>
                       </div>
@@ -6645,6 +6660,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                       </div>
                     </div>
                     <div className="mt-3 pt-3 border-t border-slate-100 flex items-center gap-2">
+                      <button type="button" onClick={async()=>{const nextStatus=String(k.status_akun || 'Aktif').toLowerCase()==='nonaktif'?'Aktif':'Nonaktif';if(!await modernConfirm(`Ubah status akun ${k.nama_lengkap || k.username || 'karyawan'} menjadi ${nextStatus}? ${nextStatus==='Nonaktif'?'Karyawan akan dikeluarkan dari aplikasi dan tidak dapat login kembali.':''}`, 'Ubah status akun'))return;setKaryawanList(prev=>(Array.isArray(prev)?prev:[]).map(row=>String(row.id)===String(k.id)?{...row,status_akun:nextStatus}:row));}} className={`flex-1 min-h-[42px] rounded-xl border text-xs font-extrabold active:scale-[0.98] ${String(k.status_akun || 'Aktif').toLowerCase()==='nonaktif'?'bg-emerald-50 border-emerald-100 text-emerald-700':'bg-amber-50 border-amber-100 text-amber-700'}`}><i className={`fa-solid ${String(k.status_akun || 'Aktif').toLowerCase()==='nonaktif'?'fa-user-check':'fa-user-lock'} mr-2`}></i>{String(k.status_akun || 'Aktif').toLowerCase()==='nonaktif'?'Aktifkan':'Nonaktifkan'}</button>
                       <button type="button" onClick={() => openModal(k)} className="flex-1 min-h-[42px] rounded-xl bg-indigo-50 border border-indigo-100 text-indigo-700 text-xs font-extrabold active:scale-[0.98]"><i className="fa-solid fa-pen-to-square mr-2"></i>Edit</button>
                       <button type="button" onClick={async()=>{if(!await modernConfirm(`Yakin ingin menghapus data karyawan ${k.nama_lengkap || k.username || ''}? Tindakan ini akan menghapus data karyawan dari master.`, 'Hapus karyawan')) return; setKaryawanList((Array.isArray(karyawanList) ? karyawanList : []).filter(x=>String(x.id)!==String(k.id))); showToast('Permintaan penghapusan karyawan diproses.');}} className="flex-1 min-h-[42px] rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-extrabold active:scale-[0.98]"><i className="fa-solid fa-trash mr-2"></i>Hapus</button>
                     </div>
@@ -6663,6 +6679,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                   <th className="p-4">Username</th>
                   <th className="p-4">Divisi & Jabatan</th>
                   <th className="p-4">Lokasi Presensi</th>
+                  <th className="p-4 text-center">Status Akun</th>
                   <th className="p-4 text-center">Aksi</th>
                 </tr>
               </thead>
@@ -6733,12 +6750,15 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                       </div>
                     </td>
                     <td className="p-4 text-center">
+                      <button type="button" onClick={async()=>{const nextStatus=String(k.status_akun || 'Aktif').toLowerCase()==='nonaktif'?'Aktif':'Nonaktif';if(!await modernConfirm(`Ubah status akun ${k.nama_lengkap || k.username || 'karyawan'} menjadi ${nextStatus}? ${nextStatus==='Nonaktif'?'Karyawan akan dikeluarkan dari aplikasi dan tidak dapat login kembali.':''}`, 'Ubah status akun'))return;setKaryawanList(prev=>(Array.isArray(prev)?prev:[]).map(row=>String(row.id)===String(k.id)?{...row,status_akun:nextStatus}:row));}} className={`inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-[10px] font-extrabold border ${String(k.status_akun || 'Aktif').toLowerCase()==='nonaktif'?'bg-rose-50 text-rose-700 border-rose-200':'bg-emerald-50 text-emerald-700 border-emerald-200'}`} title="Klik untuk mengubah status akun"><i className={`fa-solid ${String(k.status_akun || 'Aktif').toLowerCase()==='nonaktif'?'fa-user-lock':'fa-user-check'}`}></i>{String(k.status_akun || 'Aktif').toLowerCase()==='nonaktif'?'Nonaktif':'Aktif'}</button>
+                    </td>
+                    <td className="p-4 text-center">
                       <button onClick={()=>openModal(k)} className="w-8 h-8 rounded-full bg-slate-50 text-indigo-500 hover:bg-indigo-50 mx-1" title="Edit Data Karyawan"><i className="fa-solid fa-pen-to-square"></i></button>
                       <button onClick={async()=>{if(!await modernConfirm(`Yakin ingin menghapus data karyawan ${k.nama_lengkap || k.username || ''}? Tindakan ini akan menghapus data karyawan dari master.`, 'Hapus karyawan')) return; setKaryawanList((Array.isArray(karyawanList) ? karyawanList : []).filter(x=>String(x.id)!==String(k.id))); showToast('Permintaan penghapusan karyawan diproses.');}} className="w-8 h-8 rounded-full bg-slate-50 text-rose-500 hover:bg-rose-50 mx-1" title="Hapus Karyawan"><i className="fa-solid fa-trash"></i></button>
                     </td>
                   </tr>
                 ))}
-                {filteredKaryawanList.length === 0 && <tr><td colSpan={7} className="p-8 text-center text-xs font-semibold text-slate-400">{showIncompleteOnly && !queryKaryawan ? 'Tidak ada karyawan yang perlu dilengkapi datanya.' : 'Tidak ada karyawan yang cocok dengan pencarian.'}</td></tr>}
+                {filteredKaryawanList.length === 0 && <tr><td colSpan={8} className="p-8 text-center text-xs font-semibold text-slate-400">{showIncompleteOnly && !queryKaryawan ? 'Tidak ada karyawan yang perlu dilengkapi datanya.' : 'Tidak ada karyawan yang cocok dengan pencarian.'}</td></tr>}
               </tbody>
             </table>
             </div>
@@ -6797,6 +6817,15 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                        <input type="password" placeholder="Password Login" value={form.password} onChange={e=>setForm({...form, password:e.target.value})} className="w-full bg-slate-50 border border-slate-200 text-xs rounded-2xl p-3 font-bold outline-none" required />
                      </div>
                      <input type="email" placeholder="Alamat Email" value={form.email} onChange={e=>setForm({...form, email:e.target.value})} className="w-full bg-slate-50 border border-slate-200 text-xs rounded-2xl p-3 font-bold outline-none" required />
+
+                     <div className="rounded-2xl border border-slate-200 bg-white p-3">
+                       <label className="block text-[10px] font-extrabold uppercase tracking-wide text-slate-500 mb-2">Status Akun Karyawan</label>
+                       <select value={form.status_akun || 'Aktif'} onChange={e=>setForm({...form,status_akun:e.target.value})} className="w-full bg-slate-50 border border-slate-200 text-xs rounded-xl p-3 font-bold text-slate-700 outline-none focus:border-violet-500">
+                         <option value="Aktif">Aktif — dapat login</option>
+                         <option value="Nonaktif">Nonaktif — tidak dapat login</option>
+                       </select>
+                       {form.status_akun === 'Nonaktif' && <p className="mt-2 text-[10px] leading-relaxed text-rose-600"><i className="fa-solid fa-triangle-exclamation mr-1"></i>Akun nonaktif akan ditolak saat login dan sesi aktif akan dikeluarkan setelah status terdeteksi oleh aplikasi.</p>}
+                     </div>
 
                      <div className="bg-indigo-50/70 border border-indigo-100 rounded-2xl p-3 space-y-3">
                        <div className="flex items-center justify-between gap-3">
