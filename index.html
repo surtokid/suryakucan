@@ -427,6 +427,9 @@ const DEFAULT_MORE_APPS = [
 
       // State murni dari Supabase (tanpa data dummy)
       const [karyawanList, setKaryawanList] = useState([]);
+      // Mencegah pemeriksaan sesi berjalan sebelum master_karyawan selesai dimuat.
+      // Tanpa flag ini, daftar awal [] dianggap akun tidak ditemukan/nonaktif saat app dibuka ulang.
+      const [isKaryawanLoaded, setIsKaryawanLoaded] = useState(false);
       const [lokasiList, setLokasiList] = useState([]);
       const [divisiList, setDivisiList] = useState([]);
       const [jabatanList, setJabatanList] = useState([]);
@@ -497,6 +500,8 @@ const DEFAULT_MORE_APPS = [
             };
 
             assignIfOk(kryRes, setKaryawanList, 'master_karyawan');
+            // Tandai siap hanya jika query master_karyawan berhasil; jika gagal, jangan logout sesi valid.
+            if (!kryRes.error) setIsKaryawanLoaded(true);
 
             // Sinkronkan juga sesi karyawan yang sedang login, bukan hanya daftar master.
             // Tanpa ini, state currentUser/localStorage dapat menyimpan divisi, jabatan,
@@ -656,7 +661,9 @@ const DEFAULT_MORE_APPS = [
 
     // Effect terpisah agar selalu memakai authSession/currentUser terbaru (bukan closure awal Realtime).
     useEffect(() => {
-      if (authSession?.type !== 'karyawan' || currentUser?.id == null || !Array.isArray(karyawanList)) return;
+      // Jangan evaluasi status akun dari array kosong saat aplikasi baru dibuka.
+      // Tunggu sampai query master_karyawan berhasil agar sesi Aktif tetap dipertahankan.
+      if (authSession?.type !== 'karyawan' || currentUser?.id == null || !isKaryawanLoaded || !Array.isArray(karyawanList)) return;
       const freshCurrentUser = karyawanList.find(row => String(row.id) === String(currentUser.id));
       if (!freshCurrentUser || String(freshCurrentUser.status_akun || 'Aktif').toLowerCase() !== 'aktif') {
         localStorage.removeItem('suryatokoku_user');
@@ -681,7 +688,7 @@ const DEFAULT_MORE_APPS = [
       } catch (storageError) {
         console.warn('Gagal memperbarui cache sesi karyawan:', storageError);
       }
-    }, [karyawanList, authSession, currentUser]);
+    }, [karyawanList, authSession, currentUser, isKaryawanLoaded]);
 
     const showToast = (message, type = 'success') => {
       setToast({ message, type, id: Date.now() });
