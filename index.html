@@ -471,6 +471,27 @@ const DEFAULT_MORE_APPS = [
           if (!silent) setIsLoadingData(true);
           try {
             const client = await getSupabaseClient();
+            // Ambil seluruh data presensi secara bertahap agar tidak terpotong
+            // oleh batas maksimum baris per request Supabase/PostgREST.
+            const fetchAllPresensiRows = async () => {
+              const pageSize = 1000;
+              let from = 0;
+              const allRows = [];
+              while (true) {
+                const pageResult = await client
+                  .from('presensi')
+                  .select('*')
+                  .order('created_at', { ascending: false })
+                  .range(from, from + pageSize - 1);
+                if (pageResult.error) return { data: null, error: pageResult.error };
+                const pageRows = pageResult.data || [];
+                allRows.push(...pageRows);
+                if (pageRows.length < pageSize) break;
+                from += pageSize;
+              }
+              return { data: allRows, error: null };
+            };
+
             const results = await Promise.all([
               client.from('master_karyawan').select('*'),
               client.from('master_lokasi').select('*'),
@@ -479,7 +500,7 @@ const DEFAULT_MORE_APPS = [
               client.from('master_shift').select('*'),
               client.from('master_admin').select('*'),
               client.from('pengumuman').select('*').order('created_at', { ascending: false }),
-              client.from('presensi').select('*').order('created_at', { ascending: false }),
+              fetchAllPresensiRows(),
               client.from('pengajuan_lembur').select('*').order('created_at', { ascending: false }),
               client.from('klaim_kehadiran').select('*'),
               client.from('settings').select('key,value').in('key', ['toleransi_menit', 'pendaftaran_karyawan_aktif', 'more_apps_access', 'more_apps_catalog'])
@@ -1497,7 +1518,12 @@ const DEFAULT_MORE_APPS = [
     }) {
       const [clock, setClock] = useState(new Date());
       const [showYesterdayCheck, setShowYesterdayCheck] = useState(false);
+      // Penundaan hanya berlaku selama halaman/app masih terbuka. Refresh atau buka ulang akan memunculkan pengingat lagi.
+      const [hasDeferredMissingAttendance, setHasDeferredMissingAttendance] = useState(false);
       const [selectedClaimShift, setSelectedClaimShift] = useState('');
+      const [missingAttendanceDates, setMissingAttendanceDates] = useState([]);
+      const [selectedMissingAttendanceDate, setSelectedMissingAttendanceDate] = useState('');
+      const [isSavingMissingAttendance, setIsSavingMissingAttendance] = useState(false);
       const [selectedAnnouncement, setSelectedAnnouncement] = useState(null);
       const [showWizardModal, setShowWizardModal] = useState(false);
       const [wizardType, setWizardType] = useState('masuk'); 
@@ -1543,75 +1569,42 @@ const DEFAULT_MORE_APPS = [
       }, []);
 
       useEffect(() => {
-        // Jangan pernah membuka popup hanya berdasarkan daftar lokal yang mungkin masih kosong.
-        // Tunggu muatan awal selesai, lalu verifikasi langsung ke Supabase untuk tanggal kemarin.
+        // Periksa seluruh tanggal pada siklus presensi 26-25, termasuk Minggu/tanggal merah.
+        // Data presensi dan klaim harus sudah selesai dimuat agar tanggal yang sudah tercatat tidak ditanyakan.
         if (!isPresensiReady || !currentUser?.id) return;
-
-        let cancelled = false;
         const now = new Date();
-        const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-        // Versi key dinaikkan supaya hasil pemeriksaan lama tidak memengaruhi logika yang baru.
-        const checkKey = `yesterday_checked_v2_${currentUser.id}_${todayKey}`;
-        try {
-          if (sessionStorage.getItem(checkKey)) return;
-        } catch (_) {}
-
-        const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
-        const yStr = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`;
-
-        (async () => {
-          try {
-            const client = await getSupabaseClient();
-            const { data, error } = await client
-              .from('presensi')
-              .select('id, karyawan_id, tanggal, status, tipe')
-              .eq('karyawan_id', currentUser.id)
-              .eq('tanggal', yStr)
-              .limit(1);
-
-            // Jika query gagal, jangan menampilkan popup dan jangan menandai pemeriksaan selesai.
-            // Ini mencegah prompt keliru saat koneksi/RLS/data Supabase belum siap.
-            if (cancelled || error) {
-              if (error) console.warn('Verifikasi presensi kemarin gagal; popup ditunda:', error.message);
-              return;
-            }
-
-            // Query langsung ke Supabase adalah sumber utama. Fallback daftar state menangani
-            // perbedaan tipe ID atau format tanggal pada data yang sudah dimuat.
-            const hasDirectRecord = Array.isArray(data) && data.length > 0;
-            const hasLoadedRecord = presensiList.some(p =>
-              String(p.karyawan_id) === String(currentUser.id) &&
-              String(p.tanggal || '').slice(0, 10) === yStr
-            );
-            // Jika karyawan sudah mengajukan klaim untuk kemarin, jangan munculkan popup lagi.
-            const { data: claimRows, error: claimError } = await client
-              .from('klaim_kehadiran')
-              .select('id, karyawan_id, tanggal_klaim')
-              .eq('karyawan_id', currentUser.id)
-              .eq('tanggal_klaim', yStr)
-              .limit(1);
-            if (cancelled || claimError) {
-              if (claimError) console.warn('Verifikasi klaim kemarin gagal; popup ditunda:', claimError.message);
-              return;
-            }
-            const hasDirectClaim = Array.isArray(claimRows) && claimRows.length > 0;
-            const hasLoadedClaim = (Array.isArray(klaimList) ? klaimList : []).some(c =>
-              String(c.karyawan_id) === String(currentUser.id) && String(c.tanggal_klaim || '').slice(0, 10) === yStr
-            );
-
-            if (!cancelled && !hasDirectRecord && !hasLoadedRecord && !hasDirectClaim && !hasLoadedClaim) {
-              setShowYesterdayCheck(true);
-            } else if (!cancelled) {
-              try { sessionStorage.setItem(checkKey, 'true'); } catch (_) {}
-              setShowYesterdayCheck(false);
-            }
-          } catch (err) {
-            console.warn('Belum dapat memverifikasi presensi kemarin; popup ditunda:', err);
-          }
-        })();
-
-        return () => { cancelled = true; };
-      }, [currentUser?.id, isPresensiReady, klaimList, presensiList]);
+        const cycleStart = now.getDate() >= 26
+          ? new Date(now.getFullYear(), now.getMonth(), 26)
+          : new Date(now.getFullYear(), now.getMonth() - 1, 26);
+        const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        // Karyawan baru tidak diminta mengonfirmasi tanggal sebelum tanggal mulai bekerja.
+        // Untuk data karyawan lama yang belum memiliki tanggal_masuk, gunakan awal siklus agar perilaku lama tetap terjaga.
+        const employeeStartRaw = String(currentUser.tanggal_masuk || '').slice(0, 10);
+        const employeeStartMatch = employeeStartRaw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+        const employeeStartDate = employeeStartMatch
+          ? new Date(Number(employeeStartMatch[1]), Number(employeeStartMatch[2]) - 1, Number(employeeStartMatch[3]))
+          : new Date(cycleStart);
+        const effectiveStartDate = employeeStartDate > cycleStart ? employeeStartDate : cycleStart;
+        const records = (Array.isArray(presensiList) ? presensiList : []).filter(p =>
+          String(p.karyawan_id) === String(currentUser.id)
+        );
+        const claims = (Array.isArray(klaimList) ? klaimList : []).filter(c =>
+          String(c.karyawan_id) === String(currentUser.id)
+        );
+        const recordedDates = new Set(records.map(p => String(p.tanggal || '').slice(0, 10)).filter(Boolean));
+        const claimedDates = new Set(claims.map(c => String(c.tanggal_klaim || '').slice(0, 10)).filter(Boolean));
+        const missing = [];
+        for (let d = new Date(effectiveStartDate); d < todayStart; d.setDate(d.getDate() + 1)) {
+          const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+          if (!recordedDates.has(key) && !claimedDates.has(key)) missing.push(key);
+        }
+        missing.sort((a, b) => a.localeCompare(b));
+        setMissingAttendanceDates(missing);
+        setSelectedMissingAttendanceDate(missing[0] || '');
+        // Jangan buka ulang popup akibat perubahan props/state selama sesi yang sama setelah pengguna memilih Ingatkan Nanti.
+        // State ini kembali false secara otomatis ketika halaman dimuat ulang/dibuka kembali.
+        if (!hasDeferredMissingAttendance) setShowYesterdayCheck(missing.length > 0);
+      }, [currentUser?.id, isPresensiReady, presensiList, klaimList, hasDeferredMissingAttendance]);
 
       const payrollCycle = useMemo(() => {
         const now = new Date();
@@ -1773,10 +1766,11 @@ const DEFAULT_MORE_APPS = [
       };
 
       const handleYesterdayConfirm = async (status, note) => {
-        // Simpan ke tanggal kalender kemarin berdasarkan waktu lokal; jangan hanya mengubah state React.
-        const nowLocal = new Date();
-        const yesterday = new Date(nowLocal.getFullYear(), nowLocal.getMonth(), nowLocal.getDate() - 1);
-        const yStr = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`;
+        // Simpan pada tanggal yang sedang dikonfirmasi, bukan tanggal hari ini.
+        const yStr = selectedMissingAttendanceDate;
+        if (!yStr) { showToast('Tanggal konfirmasi tidak ditemukan.', 'error'); return; }
+        if (isSavingMissingAttendance) return;
+        setIsSavingMissingAttendance(true);
 
         // Cegah duplikasi dengan memeriksa Supabase langsung sebelum menyimpan.
         try {
@@ -1793,12 +1787,8 @@ const DEFAULT_MORE_APPS = [
             const existing = existingRows[0];
             // Catatan sudah ada di database; cukup tutup popup. Jangan memasukkan
             // object parsial hasil query ke state riwayat.
-            setShowYesterdayCheck(false);
-            try {
-              const now = new Date();
-              const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-              sessionStorage.setItem(`yesterday_checked_v2_${currentUser.id}_${todayKey}`, 'true');
-            } catch (_) {}
+            setPresensiList(prev => prev.some(p => String(p.karyawan_id) === String(currentUser.id) && String(p.tanggal || '').slice(0, 10) === yStr) ? prev : [...prev, existing]);
+            setMissingAttendanceDates(prev => prev.filter(d => d !== yStr));
             showToast(`Presensi tanggal ${yStr} sudah tercatat sebagai ${existing.status || 'presensi'}.`, 'info');
             return;
           }
@@ -1840,18 +1830,15 @@ const DEFAULT_MORE_APPS = [
             setCurrentUser(prev => ({ ...prev, sisa_cuti: Number(prev.sisa_cuti) - 1 }));
           }
 
+          setMissingAttendanceDates(prev => prev.filter(d => d !== yStr));
           setShowYesterdayCheck(false);
-          try {
-            const nowToday = new Date();
-            const todayKey = `${nowToday.getFullYear()}-${String(nowToday.getMonth() + 1).padStart(2, '0')}-${String(nowToday.getDate()).padStart(2, '0')}`;
-            sessionStorage.setItem(`yesterday_checked_v2_${currentUser.id}_${todayKey}`, 'true');
-          } catch (_) {}
+          setSelectedMissingAttendanceDate('');
           showToast(`Presensi tanggal ${yStr} berhasil disimpan sebagai ${status}.`);
         } catch (error) {
-          console.error('Gagal menyimpan konfirmasi presensi kemarin ke Supabase:', error);
+          console.error('Gagal menyimpan konfirmasi presensi tanggal sebelumnya ke Supabase:', error);
           showToast(`Presensi belum tersimpan ke Supabase: ${error?.message || 'periksa koneksi, izin akses, dan struktur tabel.'}`, 'error');
-          // Popup tetap terbuka agar karyawan bisa mencoba lagi setelah masalah diperbaiki.
-        }
+          // Popup tetap terbuka agar karyawan bisa mencoba lagi.
+        } finally { setIsSavingMissingAttendance(false); }
       };
 
       const allowedClaimShifts = (() => {
@@ -1874,9 +1861,8 @@ const DEFAULT_MORE_APPS = [
           showToast('Pilih shift yang Anda jalani kemarin terlebih dahulu.', 'error');
           return;
         }
-        const nowLocal = new Date();
-        const yesterday = new Date(nowLocal.getFullYear(), nowLocal.getMonth(), nowLocal.getDate() - 1);
-        const yStr = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`;
+        const yStr = selectedMissingAttendanceDate;
+        if (!yStr) { showToast('Tanggal klaim tidak ditemukan.', 'error'); return; }
         const selectedShift = allowedClaimShifts.find(s => String(s.nama_shift) === String(selectedClaimShift));
         if (!selectedShift) {
           showToast('Shift yang dipilih tidak ditemukan pada Master Shift divisi Anda.', 'error');
@@ -1900,13 +1886,11 @@ const DEFAULT_MORE_APPS = [
           const { error } = await client.from('klaim_kehadiran').insert([claim]);
           if (error) throw error;
           setKlaimList([claim, ...(Array.isArray(klaimList) ? klaimList : [])]);
+          setMissingAttendanceDates(prev => prev.filter(d => d !== yStr));
           setShowYesterdayCheck(false);
-          try {
-            const today = new Date();
-            const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-            sessionStorage.setItem(`yesterday_checked_v2_${currentUser.id}_${todayKey}`, 'true');
-          } catch (_) {}
-          showToast('Klaim kehadiran berhasil dikirim ke HRD. Pop-up tidak akan muncul lagi untuk tanggal ini.');
+          setSelectedMissingAttendanceDate('');
+          setSelectedClaimShift('');
+          showToast(`Klaim kehadiran tanggal ${yStr} berhasil dikirim ke HRD.`);
         } catch (error) {
           console.error('Gagal mengirim klaim kehadiran:', error);
           showToast(`Klaim gagal dikirim: ${error?.message || 'periksa koneksi dan izin tabel klaim_kehadiran.'}`, 'error');
@@ -2513,31 +2497,36 @@ const DEFAULT_MORE_APPS = [
                     <i className="fa-solid fa-triangle-exclamation text-xl"></i>
                   </div>
                   <div>
-                    <h3 className="font-display font-bold text-base text-slate-800 leading-tight">Konfirmasi<br/>Presensi Kemarin</h3>
+                    <h3 className="font-display font-bold text-base text-slate-800 leading-tight">Konfirmasi<br/>Presensi Belum Tercatat</h3>
                   </div>
                 </div>
 
                 <p className="text-xs text-slate-500 mb-5 leading-relaxed">
-                  Catatan presensi Anda kemarin belum tersedia. Mohon konfirmasi status kehadiran:
+                  Catatan presensi Anda pada tanggal berikut belum tersedia. Mohon konfirmasi status kehadiran:
                 </p>
 
+                <div className="mb-4 rounded-2xl bg-amber-50 border border-amber-100 p-3 text-center">
+                  <p className="text-[10px] uppercase tracking-wide text-amber-700 font-bold">Tanggal yang dikonfirmasi</p>
+                  <p className="text-lg font-extrabold text-slate-900">{selectedMissingAttendanceDate ? new Date(selectedMissingAttendanceDate + 'T00:00:00').toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : '-'}</p>
+                  <p className="text-[10px] text-amber-700 mt-1">Sisa {missingAttendanceDates.length} tanggal perlu dikonfirmasi · urut dari yang terlama</p>
+                </div>
                 <div className="grid grid-cols-2 gap-3 mb-5">
-                  <button onClick={() => handleYesterdayConfirm('Libur', 'Libur kemarin')} className="py-3 px-3 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs rounded-2xl border border-slate-200 shadow-sm flex items-center justify-center gap-2">
+                  <button onClick={() => handleYesterdayConfirm('Libur', 'Konfirmasi Libur')} className="py-3 px-3 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs rounded-2xl border border-slate-200 shadow-sm flex items-center justify-center gap-2">
                     <i className="fa-solid fa-umbrella-beach text-sky-500"></i> Libur
                   </button>
-                  <button onClick={() => handleYesterdayConfirm('Sakit', 'Sakit kemarin')} className="py-3 px-3 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs rounded-2xl border border-slate-200 shadow-sm flex items-center justify-center gap-2">
+                  <button onClick={() => handleYesterdayConfirm('Sakit', 'Konfirmasi Sakit')} className="py-3 px-3 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs rounded-2xl border border-slate-200 shadow-sm flex items-center justify-center gap-2">
                     <i className="fa-solid fa-bed text-amber-500"></i> Sakit
                   </button>
-                  <button onClick={() => handleYesterdayConfirm('Izin', 'Izin kemarin')} className="py-3 px-3 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs rounded-2xl border border-slate-200 shadow-sm flex items-center justify-center gap-2">
+                  <button onClick={() => handleYesterdayConfirm('Izin', 'Konfirmasi Izin')} className="py-3 px-3 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs rounded-2xl border border-slate-200 shadow-sm flex items-center justify-center gap-2">
                     <i className="fa-solid fa-hand text-orange-500"></i> Izin
                   </button>
-                  <button onClick={() => handleYesterdayConfirm('Cuti', 'Cuti kemarin')} className="py-3 px-3 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs rounded-2xl border border-slate-200 shadow-sm flex items-center justify-center gap-2">
+                  <button onClick={() => handleYesterdayConfirm('Cuti', 'Konfirmasi Cuti')} className="py-3 px-3 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs rounded-2xl border border-slate-200 shadow-sm flex items-center justify-center gap-2">
                     <i className="fa-solid fa-calendar-check text-purple-500"></i> Cuti
                   </button>
                 </div>
 
                 <div className="mb-3 rounded-2xl border border-violet-100 bg-violet-50/70 p-3 text-left">
-                  <label htmlFor="yesterdayClaimShift" className="block text-[11px] font-extrabold text-violet-800 mb-2">Pilih shift yang dijalani kemarin</label>
+                  <label htmlFor="yesterdayClaimShift" className="block text-[11px] font-extrabold text-violet-800 mb-2">Pilih shift yang dijalani pada tanggal tersebut</label>
                   <select id="yesterdayClaimShift" value={selectedClaimShift} onChange={e => setSelectedClaimShift(e.target.value)} className="w-full rounded-xl border border-violet-200 bg-white px-3 py-3 text-xs font-bold text-slate-700 outline-none focus:ring-2 focus:ring-violet-300">
                     <option value="">-- Pilih Shift --</option>
                     {allowedClaimShifts.map(shift => <option key={shift.id || shift.nama_shift} value={shift.nama_shift}>{shift.nama_shift} ({formatShiftTimeDisplay(shift.jam_masuk)} - {formatShiftTimeDisplay(shift.jam_pulang)})</option>)}
@@ -2545,9 +2534,9 @@ const DEFAULT_MORE_APPS = [
                   {allowedClaimShifts.length === 0 && <p className="text-[10px] text-rose-600 mt-2">Belum ada shift yang ditetapkan untuk divisi Anda. Hubungi HRD.</p>}
                 </div>
                 <button onClick={handleYesterdayClaimHR} disabled={!selectedClaimShift || allowedClaimShifts.length === 0} className="w-full py-3.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold text-xs rounded-full shadow-md mb-2">
-                  Kemarin Masuk (Klaim ke HR)
+                  Masuk (Ajukan Klaim ke HR)
                 </button>
-                <button onClick={() => setShowYesterdayCheck(false)} className="w-full py-2.5 text-slate-400 hover:text-slate-600 text-[11px] font-bold">
+                <button onClick={() => { setHasDeferredMissingAttendance(true); setShowYesterdayCheck(false); }} className="w-full py-2.5 text-slate-400 hover:text-slate-600 text-[11px] font-bold">
                   Ingatkan Nanti
                 </button>
               </div>
@@ -6348,6 +6337,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
       const [form, setForm] = useState({ 
         nama_lengkap: '', 
         nik: '',
+        tanggal_masuk: new Date().toLocaleDateString('en-CA'),
         lokasi_absen: [],
         tgl_lahir: '', 
         username: '', 
@@ -6456,7 +6446,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
           let alm = {};
           try { alm = typeof k.alamat === 'string' ? JSON.parse(k.alamat) : (k.alamat || {}); } catch (e) { alm = { jalan: k.alamat || '' }; }
           setForm({
-            nama_lengkap: k.nama_lengkap || '', nik: String(k.nik || ''), lokasi_absen: Array.isArray(k.lokasi_absen) ? (k.lokasi_absen.map(String).includes('*') && !k.lokasi_absen.map(String).some(id => id !== '*') ? ['*', ...lokasiList.map(l => String(l.id))] : k.lokasi_absen.map(String)) : lokasiList.map(l => String(l.id)), tgl_lahir: toDisplayDate(k.tgl_lahir), username: k.username || '',
+            nama_lengkap: k.nama_lengkap || '', nik: String(k.nik || ''), tanggal_masuk: k.tanggal_masuk || '', lokasi_absen: Array.isArray(k.lokasi_absen) ? (k.lokasi_absen.map(String).includes('*') && !k.lokasi_absen.map(String).some(id => id !== '*') ? ['*', ...lokasiList.map(l => String(l.id))] : k.lokasi_absen.map(String)) : lokasiList.map(l => String(l.id)), tgl_lahir: toDisplayDate(k.tgl_lahir), username: k.username || '',
             password: k.password || '', no_wa: k.no_wa || '', email: k.email || '', divisi: k.divisi || '',
             jabatan: k.jabatan || '', provinsi: alm.provinsi || '', kota: alm.kota || '',
             kecamatan: alm.kecamatan || '', desa: alm.desa || alm.kelurahan || '', jalan: alm.jalan || '',
@@ -6487,7 +6477,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
           } catch (err) { setWilayahError(err.message || 'Gagal memuat data wilayah.'); }
         } else {
           setEditingId(null);
-          setForm({ nama_lengkap: '', nik: '', lokasi_absen: lokasiList.map(l => String(l.id)), tgl_lahir: '', username: '', password: '', no_wa: '', email: '', divisi: divisiList[0]?.nama_divisi || '', jabatan: '', provinsi: '', kota: '', kecamatan: '', desa: '', jalan: '', foto_profil: '' });
+          setForm({ nama_lengkap: '', nik: '', tanggal_masuk: new Date().toLocaleDateString('en-CA'), lokasi_absen: lokasiList.map(l => String(l.id)), tgl_lahir: '', username: '', password: '', no_wa: '', email: '', divisi: divisiList[0]?.nama_divisi || '', jabatan: '', provinsi: '', kota: '', kecamatan: '', desa: '', jalan: '', foto_profil: '' });
           setShowModal(true);
           if (!provinceOptions.length) {
             try { setProvinceOptions(await fetchWilayah('provinces')); }
@@ -6563,7 +6553,12 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
             }
           }
           const alamat = JSON.stringify({ provinsi: form.provinsi, kota: form.kota, kecamatan: form.kecamatan, desa: form.desa, jalan: form.jalan });
-          const cleanForm = { ...form, status_akun: String(form.status_akun || 'Aktif') === 'Nonaktif' ? 'Nonaktif' : 'Aktif', nik: nik || null, lokasi_absen: (form.lokasi_absen || []).map(String), tgl_lahir: tglLahirIso, no_wa: noWa, foto_profil: fotoProfilUrl };
+          const tanggalMasuk = String(form.tanggal_masuk || '').trim();
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(tanggalMasuk) || Number.isNaN(new Date(`${tanggalMasuk}T00:00:00`).getTime())) {
+            showToast('Tanggal mulai bekerja wajib diisi dengan tanggal yang valid.', 'error');
+            return;
+          }
+          const cleanForm = { ...form, tanggal_masuk: tanggalMasuk, status_akun: String(form.status_akun || 'Aktif') === 'Nonaktif' ? 'Nonaktif' : 'Aktif', nik: nik || null, lokasi_absen: (form.lokasi_absen || []).map(String), tgl_lahir: tglLahirIso, no_wa: noWa, foto_profil: fotoProfilUrl };
           if(editingId) {
             setKaryawanList(karyawanList.map(k => k.id === editingId ? { ...k, ...cleanForm, alamat } : k));
           } else {
@@ -6808,6 +6803,12 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
                        <p className="text-[10px] text-slate-400 mt-1 ml-1">Nomor induk karyawan bersifat opsional; panjangnya bebas.</p>
                      </div>
                      
+                     <div>
+                       <label className="text-[10px] font-bold text-slate-400 ml-1 block mb-1">Tanggal Mulai Bekerja</label>
+                       <input type="date" value={form.tanggal_masuk || ''} onChange={e=>setForm({...form, tanggal_masuk:e.target.value})} className="w-full bg-slate-50 border border-slate-200 text-xs rounded-2xl p-3 font-bold outline-none" required />
+                       <p className="text-[10px] text-slate-400 mt-1 ml-1">Digunakan sebagai batas awal pemeriksaan kekosongan presensi.</p>
+                     </div>
+
                      <div className="grid grid-cols-2 gap-2">
                        <div>
                          <label className="text-[10px] font-bold text-slate-400 ml-1 block mb-1">Tanggal Lahir</label>
