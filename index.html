@@ -448,6 +448,8 @@ const DEFAULT_MORE_APPS = [
       const [moreAppsCatalog, setMoreAppsCatalog] = useState(DEFAULT_MORE_APPS);
         
       const [presensiList, setPresensiList] = useState([]);
+      // Snapshot presensi hari ini seluruh rekan, dipisah dari riwayat pribadi karyawan.
+      const [rekanPresensiList, setRekanPresensiList] = useState([]);
       const [isPresensiReady, setIsPresensiReady] = useState(false);
       const [lemburList, setLemburList] = useState([]);
       const [klaimList, setKlaimList] = useState([]);
@@ -486,15 +488,24 @@ const DEFAULT_MORE_APPS = [
             lastLoadedAuthKeyRef.current = authKey;
 
             // Admin mengambil seluruh presensi dengan pagination. Karyawan hanya mengambil
-            // baris miliknya sendiri; pengunjung/login screen tidak mengambil data transaksi.
+            // presensi pribadinya untuk siklus 26-25 aktif agar halaman awal tetap ringan.
             const fetchPresensiRows = async () => {
               if (!canLoadAttendance) return { data: [], error: null };
               const pageSize = 1000;
               let from = 0;
               const allRows = [];
+              const now = new Date();
+              const cycleStart = now.getDate() >= 26
+                ? new Date(now.getFullYear(), now.getMonth(), 26)
+                : new Date(now.getFullYear(), now.getMonth() - 1, 26);
+              const cycleEnd = now.getDate() >= 26
+                ? new Date(now.getFullYear(), now.getMonth() + 1, 25)
+                : new Date(now.getFullYear(), now.getMonth(), 25);
+              const toKey = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
               while (true) {
                 let query = client.from('presensi').select('*');
-                if (!adminMode) query = query.eq('karyawan_id', employeeId);
+                if (!adminMode) query = query.eq('karyawan_id', employeeId)
+                  .gte('tanggal', toKey(cycleStart)).lte('tanggal', toKey(cycleEnd));
                 const pageResult = await query
                   .order('created_at', { ascending: false })
                   .range(from, from + pageSize - 1);
@@ -507,6 +518,15 @@ const DEFAULT_MORE_APPS = [
               return { data: allRows, error: null };
             };
 
+            // Menu Rekan membutuhkan status presensi semua karyawan hari ini.
+            // Query kecil ini menggantikan ketergantungan keliru pada riwayat pribadi.
+            const fetchRekanRows = async () => {
+              if (adminMode || employeeId == null) return { data: [], error: null };
+              const today = new Date();
+              const todayKey = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
+              return client.from('presensi').select('*').eq('tanggal', todayKey);
+            };
+
             const fetchEmployeeTable = (table, orderBy = null) => {
               if (!canLoadAttendance) return Promise.resolve({ data: [], error: null });
               let query = client.from(table).select('*');
@@ -515,6 +535,12 @@ const DEFAULT_MORE_APPS = [
               return query;
             };
 
+            // Pengumuman diambil terpisah agar kartu pengumuman dapat tampil segera,
+            // tidak menunggu pagination presensi atau query master lain.
+            client.from('pengumuman').select('*').order('created_at', { ascending: false })
+              .then(result => { if (isMounted && !result.error) setPengumumanList(result.data || []); })
+              .catch(error => console.warn('Gagal memuat pengumuman:', error));
+
             const results = await Promise.all([
               client.from('master_karyawan').select('*'),
               client.from('master_lokasi').select('*'),
@@ -522,8 +548,8 @@ const DEFAULT_MORE_APPS = [
               client.from('master_jabatan').select('*'),
               client.from('master_shift').select('*'),
               client.from('master_admin').select('*'),
-              client.from('pengumuman').select('*').order('created_at', { ascending: false }),
               fetchPresensiRows(),
+              fetchRekanRows(),
               fetchEmployeeTable('pengajuan_lembur', 'created_at'),
               fetchEmployeeTable('klaim_kehadiran'),
               client.from('settings').select('key,value').in('key', ['toleransi_menit', 'pendaftaran_karyawan_aktif', 'more_apps_access', 'more_apps_catalog'])
@@ -532,7 +558,7 @@ const DEFAULT_MORE_APPS = [
             if (!isMounted) return;
             const [
               kryRes, lokRes, divRes, jabRes, shRes, admRes,
-              pgmRes, prsRes, lmbRes, klmRes, settingsRes
+              prsRes, rekanRes, lmbRes, klmRes, settingsRes
             ] = results;
 
             const assignIfOk = (result, setter, label) => {
@@ -584,8 +610,8 @@ const DEFAULT_MORE_APPS = [
               setIsAdminTableEmpty(false);
             }
 
-            assignIfOk(pgmRes, setPengumumanList, 'pengumuman');
             assignIfOk(prsRes, setPresensiList, 'presensi');
+            if (!adminMode) assignIfOk(rekanRes, setRekanPresensiList, 'presensi rekan hari ini');
             // Jangan jalankan pemeriksaan presensi sebelum data untuk sesi aktif selesai dimuat.
             if (!prsRes.error && canLoadAttendance) setIsPresensiReady(true);
             if (!canLoadAttendance) setIsPresensiReady(false);
@@ -1161,6 +1187,7 @@ const DEFAULT_MORE_APPS = [
                 setKaryawanList={setKaryawanList}
                 karyawanList={karyawanList}
                 presensiList={presensiList}
+                rekanPresensiList={rekanPresensiList}
                 setPresensiList={setPresensiList}
                 isPresensiReady={isPresensiReady}
                 lokasiList={lokasiList}
@@ -1537,6 +1564,7 @@ const DEFAULT_MORE_APPS = [
       setKaryawanList,
       karyawanList,
       presensiList,
+      rekanPresensiList = [],
       setPresensiList,
       isPresensiReady,
       lokasiList,
@@ -2065,7 +2093,7 @@ const DEFAULT_MORE_APPS = [
 
           {/* Conditional Sub-Pages inside Employee Mobile Portal */}
           {currentRoute === '#status-karyawan' ? (
-            <StatusRekanView karyawanList={karyawanList} presensiList={presensiList} currentUser={currentUser} />
+            <StatusRekanView karyawanList={karyawanList} presensiList={rekanPresensiList} currentUser={currentUser} />
           ) : currentRoute === '#more-apps' ? (
             <div className="px-5 pt-4 pb-28 space-y-5">
               <div className="relative overflow-hidden rounded-3xl border border-violet-100 bg-gradient-to-r from-violet-50 via-white to-fuchsia-50 p-4 shadow-sm">
