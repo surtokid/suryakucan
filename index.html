@@ -2774,10 +2774,35 @@ const DEFAULT_MORE_APPS = [
         });
       }, [shiftList, allowedShiftNames]);
       const [selectedShift, setSelectedShift] = useState('');
-      // Pilih shift paling pagi dari shift yang diizinkan saja.
+      // Pilih otomatis shift dengan jam masuk yang paling dekat dengan waktu
+      // perangkat saat wizard presensi dibuka. Hanya shift yang diizinkan
+      // untuk divisi karyawan yang menjadi kandidat.
+      const getNearestShiftName = (list) => {
+        if (!Array.isArray(list) || !list.length) return '';
+        const now = new Date();
+        const currentMinutes = now.getHours() * 60 + now.getMinutes();
+        const toMinutes = (value) => {
+          const match = String(value || '').match(/^(\d{1,2}):(\d{2})/);
+          if (!match) return Number.MAX_SAFE_INTEGER;
+          const hours = Number(match[1]);
+          const minutes = Number(match[2]);
+          return hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59
+            ? hours * 60 + minutes
+            : Number.MAX_SAFE_INTEGER;
+        };
+        return [...list]
+          .map(shift => {
+            const shiftMinutes = toMinutes(shift.jam_masuk);
+            const rawDifference = Math.abs(shiftMinutes - currentMinutes);
+            const circularDifference = Math.min(rawDifference, 1440 - rawDifference);
+            return { shift, difference: circularDifference };
+          })
+          .filter(item => item.difference !== Number.MAX_SAFE_INTEGER)
+          .sort((a, b) => a.difference - b.difference)[0]?.shift?.nama_shift || '';
+      };
       useEffect(() => {
         if (!sortedShiftList.some(s => s.nama_shift === selectedShift)) {
-          setSelectedShift(sortedShiftList[0]?.nama_shift || '');
+          setSelectedShift(getNearestShiftName(sortedShiftList));
         }
       }, [sortedShiftList, selectedShift]);
       const [statusPulang, setStatusPulang] = useState('Pulang');
