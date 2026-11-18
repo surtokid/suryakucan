@@ -1,5 +1,5 @@
 <!DOCTYPE html><html lang="id"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><title>SuryaKuCan</title>
-  <!-- V31: status akun karyawan --><link rel="icon" type="image/png" href="./Logo%20SuryaKuCan.png"><link rel="apple-touch-icon" href="./Logo%20SuryaKuCan.png"><link rel="manifest" href="./manifest.json?v=suryakucan-v4"><meta name="theme-color" content="#ec4899"><meta name="application-name" content="SuryaKuCan"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="default"><meta name="apple-mobile-web-app-title" content="SuryaKuCan"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/><script src="https://cdn.tailwindcss.com"></script><script>
+  <!-- V38: optimasi pemuatan data berdasarkan peran --><link rel="icon" type="image/png" href="./Logo%20SuryaKuCan.png"><link rel="apple-touch-icon" href="./Logo%20SuryaKuCan.png"><link rel="manifest" href="./manifest.json?v=suryakucan-v4"><meta name="theme-color" content="#ec4899"><meta name="application-name" content="SuryaKuCan"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="default"><meta name="apple-mobile-web-app-title" content="SuryaKuCan"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/><script src="https://cdn.tailwindcss.com"></script><script>
     tailwind.config = {
       theme: {
         extend: {
@@ -424,6 +424,11 @@ const DEFAULT_MORE_APPS = [
       const [isAdmin, setIsAdmin] = useState(() => {
         return localStorage.getItem('suryatokoku_is_admin') === 'true';
       });
+      // Context autentikasi terbaru dibaca oleh loader/realtime tanpa stale closure.
+      const authContextRef = useRef(null);
+      authContextRef.current = { authSession, currentUser, isAdmin };
+      const refreshDataRef = useRef(null);
+      const lastLoadedAuthKeyRef = useRef(null);
 
       // State murni dari Supabase (tanpa data dummy)
       const [karyawanList, setKaryawanList] = useState([]);
@@ -471,16 +476,26 @@ const DEFAULT_MORE_APPS = [
           if (!silent) setIsLoadingData(true);
           try {
             const client = await getSupabaseClient();
-            // Ambil seluruh data presensi secara bertahap agar tidak terpotong
-            // oleh batas maksimum baris per request Supabase/PostgREST.
-            const fetchAllPresensiRows = async () => {
+            const authContext = authContextRef.current || {};
+            const adminMode = !!authContext.isAdmin || authContext.authSession?.type === 'admin';
+            const employeeId = !adminMode && authContext.authSession?.type === 'karyawan'
+              ? authContext.currentUser?.id ?? authContext.authSession?.id
+              : null;
+            const canLoadAttendance = adminMode || employeeId != null;
+            const authKey = adminMode ? 'admin' : (employeeId != null ? `karyawan:${employeeId}` : 'guest');
+            lastLoadedAuthKeyRef.current = authKey;
+
+            // Admin mengambil seluruh presensi dengan pagination. Karyawan hanya mengambil
+            // baris miliknya sendiri; pengunjung/login screen tidak mengambil data transaksi.
+            const fetchPresensiRows = async () => {
+              if (!canLoadAttendance) return { data: [], error: null };
               const pageSize = 1000;
               let from = 0;
               const allRows = [];
               while (true) {
-                const pageResult = await client
-                  .from('presensi')
-                  .select('*')
+                let query = client.from('presensi').select('*');
+                if (!adminMode) query = query.eq('karyawan_id', employeeId);
+                const pageResult = await query
                   .order('created_at', { ascending: false })
                   .range(from, from + pageSize - 1);
                 if (pageResult.error) return { data: null, error: pageResult.error };
@@ -492,6 +507,14 @@ const DEFAULT_MORE_APPS = [
               return { data: allRows, error: null };
             };
 
+            const fetchEmployeeTable = (table, orderBy = null) => {
+              if (!canLoadAttendance) return Promise.resolve({ data: [], error: null });
+              let query = client.from(table).select('*');
+              if (!adminMode) query = query.eq('karyawan_id', employeeId);
+              if (orderBy) query = query.order(orderBy, { ascending: false });
+              return query;
+            };
+
             const results = await Promise.all([
               client.from('master_karyawan').select('*'),
               client.from('master_lokasi').select('*'),
@@ -500,9 +523,9 @@ const DEFAULT_MORE_APPS = [
               client.from('master_shift').select('*'),
               client.from('master_admin').select('*'),
               client.from('pengumuman').select('*').order('created_at', { ascending: false }),
-              fetchAllPresensiRows(),
-              client.from('pengajuan_lembur').select('*').order('created_at', { ascending: false }),
-              client.from('klaim_kehadiran').select('*'),
+              fetchPresensiRows(),
+              fetchEmployeeTable('pengajuan_lembur', 'created_at'),
+              fetchEmployeeTable('klaim_kehadiran'),
               client.from('settings').select('key,value').in('key', ['toleransi_menit', 'pendaftaran_karyawan_aktif', 'more_apps_access', 'more_apps_catalog'])
             ]);
 
@@ -563,8 +586,9 @@ const DEFAULT_MORE_APPS = [
 
             assignIfOk(pgmRes, setPengumumanList, 'pengumuman');
             assignIfOk(prsRes, setPresensiList, 'presensi');
-            // Jangan jalankan pemeriksaan presensi kemarin sebelum data presensi selesai dimuat.
-            if (!prsRes.error) setIsPresensiReady(true);
+            // Jangan jalankan pemeriksaan presensi sebelum data untuk sesi aktif selesai dimuat.
+            if (!prsRes.error && canLoadAttendance) setIsPresensiReady(true);
+            if (!canLoadAttendance) setIsPresensiReady(false);
             assignIfOk(lmbRes, setLemburList, 'pengajuan_lembur');
             assignIfOk(klmRes, setKlaimList, 'klaim_kehadiran');
 
@@ -626,6 +650,7 @@ const DEFAULT_MORE_APPS = [
           'settings'
         ];
 
+        refreshDataRef.current = fetchAllFromSupabase;
         fetchAllFromSupabase();
 
         // Berlangganan perubahan INSERT / UPDATE / DELETE pada tabel aplikasi.
@@ -670,6 +695,7 @@ const DEFAULT_MORE_APPS = [
 
         return () => {
           isMounted = false;
+          refreshDataRef.current = null;
           if (refreshTimer) clearTimeout(refreshTimer);
           if (pollingTimer) clearInterval(pollingTimer);
           document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -679,6 +705,17 @@ const DEFAULT_MORE_APPS = [
           }
         };
       }, []);
+
+    // Saat login/logout atau berganti akun, muat ulang data sesuai peran dan ID akun terbaru.
+    useEffect(() => {
+      const nextKey = isAdmin || authSession?.type === 'admin'
+        ? 'admin'
+        : (authSession?.type === 'karyawan' && currentUser?.id != null
+            ? `karyawan:${currentUser.id}`
+            : 'guest');
+      if (lastLoadedAuthKeyRef.current === nextKey) return;
+      if (refreshDataRef.current) refreshDataRef.current({ silent: true });
+    }, [authSession?.type, authSession?.id, currentUser?.id, isAdmin]);
 
     // Effect terpisah agar selalu memakai authSession/currentUser terbaru (bukan closure awal Realtime).
     useEffect(() => {
