@@ -65,7 +65,10 @@
   main table:not(.keep-table-mobile) td .flex button { min-height: 36px; }
 }
 
-</style></head><body class="bg-slate-50 min-h-screen text-slate-800 antialiased selection:bg-violet-500 selection:text-white relative"><div class="fixed inset-0 z-[-1] overflow-hidden pointer-events-none opacity-60"><div class="absolute top-[-10%] left-[-10%] w-96 h-96 bg-violet-300/40 rounded-full mix-blend-multiply filter blur-3xl animate-blob"></div><div class="absolute top-[20%] right-[-10%] w-96 h-96 bg-fuchsia-300/40 rounded-full mix-blend-multiply filter blur-3xl animate-blob animation-delay-2000"></div><div class="absolute bottom-[-20%] left-[20%] w-96 h-96 bg-orange-300/40 rounded-full mix-blend-multiply filter blur-3xl animate-blob animation-delay-4000"></div></div><div id="root"></div><script>
+</style><style>
+@keyframes loadingBar { 0% { transform: translateX(-120%); } 100% { transform: translateX(360%); } }
+</style>
+</head><body class="bg-slate-50 min-h-screen text-slate-800 antialiased selection:bg-violet-500 selection:text-white relative"><div class="fixed inset-0 z-[-1] overflow-hidden pointer-events-none opacity-60"><div class="absolute top-[-10%] left-[-10%] w-96 h-96 bg-violet-300/40 rounded-full mix-blend-multiply filter blur-3xl animate-blob"></div><div class="absolute top-[20%] right-[-10%] w-96 h-96 bg-fuchsia-300/40 rounded-full mix-blend-multiply filter blur-3xl animate-blob animation-delay-2000"></div><div class="absolute bottom-[-20%] left-[20%] w-96 h-96 bg-orange-300/40 rounded-full mix-blend-multiply filter blur-3xl animate-blob animation-delay-4000"></div></div><div id="root"></div><script>
 /* Build mobile card labels from each table's real column headings before the heading row is hidden by CSS. */
 (function(){
   function labelMobileTableCells(scope){
@@ -440,6 +443,7 @@ const DEFAULT_MORE_APPS = [
       const [jabatanList, setJabatanList] = useState([]);
       const [shiftList, setShiftList] = useState([]);
       const [pengumumanList, setPengumumanList] = useState([]);
+      const [isPengumumanReady, setIsPengumumanReady] = useState(false);
       const [adminList, setAdminList] = useState([]);
       const [isAdminTableEmpty, setIsAdminTableEmpty] = useState(false);
       const [toleransiMenit, setToleransiMenit] = useState(15);
@@ -538,8 +542,13 @@ const DEFAULT_MORE_APPS = [
             // Pengumuman diambil terpisah agar kartu pengumuman dapat tampil segera,
             // tidak menunggu pagination presensi atau query master lain.
             client.from('pengumuman').select('*').order('created_at', { ascending: false })
-              .then(result => { if (isMounted && !result.error) setPengumumanList(result.data || []); })
-              .catch(error => console.warn('Gagal memuat pengumuman:', error));
+              .then(result => {
+                if (!isMounted) return;
+                if (!result.error) setPengumumanList(result.data || []);
+                else console.warn('Gagal memuat pengumuman:', result.error.message);
+              })
+              .catch(error => console.warn('Gagal memuat pengumuman:', error))
+              .finally(() => { if (isMounted) setIsPengumumanReady(true); });
 
             const results = await Promise.all([
               client.from('master_karyawan').select('*'),
@@ -1195,6 +1204,7 @@ const DEFAULT_MORE_APPS = [
                 jabatanList={jabatanList}
                 shiftList={shiftList}
                 pengumumanList={pengumumanList}
+                isPengumumanReady={isPengumumanReady}
                 lemburList={lemburList}
                 setLemburList={setLemburListSynced}
                 klaimList={klaimList}
@@ -1571,6 +1581,7 @@ const DEFAULT_MORE_APPS = [
       divisiList,
       shiftList,
       pengumumanList,
+      isPengumumanReady = false,
       lemburList,
       setLemburList,
       klaimList,
@@ -1964,6 +1975,27 @@ const DEFAULT_MORE_APPS = [
 
       return (
         <div className="max-w-md mx-auto min-h-screen bg-slate-50/70 flex flex-col pb-28 shadow-2xl relative">
+
+          {/* Glass loading overlay: menutup Beranda sampai pengumuman dan aktivitas periode siap */}
+          {(currentRoute === '#karyawan' || currentRoute === '') && (!isPengumumanReady || !isPresensiReady) && (
+            <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-900/25 backdrop-blur-md animate-[fadeIn_0.25s_ease-out]" role="status" aria-live="polite" aria-label="Memuat beranda karyawan">
+              <div className="relative w-full max-w-[320px] overflow-hidden rounded-[2rem] border border-white/70 bg-white/75 p-6 text-center shadow-[0_25px_80px_rgba(30,20,70,0.22)] backdrop-blur-2xl">
+                <div className="pointer-events-none absolute -right-8 -top-10 h-28 w-28 rounded-full bg-fuchsia-300/40 blur-2xl"></div>
+                <div className="pointer-events-none absolute -bottom-10 -left-8 h-28 w-28 rounded-full bg-violet-300/40 blur-2xl"></div>
+                <div className="relative mx-auto mb-4 flex h-24 w-24 items-center justify-center rounded-[1.8rem] border border-white/80 bg-white/80 shadow-inner p-3">
+                  <img src="Logo SuryaKuCan.png" alt="Logo SuryaKuCan" className="h-full w-full object-contain" />
+                </div>
+                <p className="relative text-[10px] font-extrabold uppercase tracking-[0.22em] text-violet-600">SuryaKuCan</p>
+                <h3 className="relative mt-2 text-base font-extrabold tracking-tight text-slate-800">Sedang memuat data</h3>
+                <div className="relative mt-5 h-2 overflow-hidden rounded-full bg-violet-100/90">
+                  <div className="h-full w-1/3 rounded-full bg-gradient-to-r from-violet-500 via-fuchsia-500 to-pink-400 animate-[loadingBar_1.35s_ease-in-out_infinite]"></div>
+                </div>
+                <div className="relative mt-3 flex items-center justify-center gap-2 text-[10px] font-semibold text-slate-500">
+                  <span className="h-1.5 w-1.5 rounded-full bg-violet-500 animate-pulse"></span>Mohon tunggu
+                </div>
+              </div>
+            </div>
+          )}
           
           {/* Kartu profil dan jam hanya tampil di halaman Beranda karyawan */}
           {(currentRoute === '#karyawan' || currentRoute === '') && (
@@ -2144,8 +2176,27 @@ const DEFAULT_MORE_APPS = [
             /* Home Beranda View */
             <div className="px-5 pt-6 space-y-6">
               
+              {/* Animasi lucu saat pengumuman pertama kali dimuat */}
+              {!isPengumumanReady && (
+                <div className="relative overflow-hidden rounded-[1.75rem] border border-violet-100 bg-gradient-to-br from-violet-50 via-white to-fuchsia-50 p-5 shadow-sm">
+                  <div className="absolute -right-5 -top-5 h-20 w-20 rounded-full bg-fuchsia-200/40 blur-2xl animate-pulse"></div>
+                  <div className="relative flex items-center gap-3">
+                    <div className="relative flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-white shadow-sm border border-violet-100">
+                      <span className="text-2xl animate-bounce">☀️</span>
+                      <span className="absolute -right-1 -top-1 text-sm animate-pulse">✨</span>
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[10px] font-extrabold uppercase tracking-widest text-violet-600">Sebentar ya!</p>
+                      <p className="mt-1 text-xs font-bold text-slate-700">Surya sedang menyiapkan pengumuman...</p>
+                      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-violet-100"><div className="h-full w-1/3 rounded-full bg-gradient-to-r from-violet-400 to-fuchsia-400 animate-[loadingBar_1.4s_ease-in-out_infinite]"></div></div>
+                    </div>
+                    <span className="text-xl animate-pulse">💜</span>
+                  </div>
+                </div>
+              )}
+
               {/* Kartu Pengumuman Terakhir Ditampilkan Penuh */}
-              {pengumumanList.length > 0 && (() => {
+              {isPengumumanReady && pengumumanList.length > 0 && (() => {
                 const latest = pengumumanList[0];
                 return (
                   <div className="bg-white/95 backdrop-blur-xl rounded-[1.75rem] p-5 border border-slate-100 shadow-[0_8px_30px_rgb(0,0,0,0.04)] space-y-3.5 relative overflow-hidden">
@@ -2378,7 +2429,14 @@ const DEFAULT_MORE_APPS = [
 
                 {/* Daftar Aktivitas Presensi Periode Aktif */}
                 <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
-                  {filteredPeriodActivities.length > 0 ? (
+                  {!isPresensiReady ? (
+                    <div className="rounded-2xl border border-dashed border-violet-200 bg-gradient-to-r from-violet-50/80 to-fuchsia-50/80 px-4 py-5 text-center">
+                      <div className="mb-2 flex items-center justify-center gap-2"><span className="text-xl animate-bounce">🐰</span><span className="text-xl animate-bounce [animation-delay:120ms]">📅</span><span className="text-xl animate-bounce [animation-delay:240ms]">✨</span></div>
+                      <p className="text-[11px] font-extrabold text-violet-700">Sedang merapikan aktivitasmu...</p>
+                      <p className="mt-1 text-[10px] text-slate-500">Tunggu sebentar, ya. Datanya sedang disiapkan.</p>
+                      <div className="mx-auto mt-3 h-1.5 max-w-[150px] overflow-hidden rounded-full bg-violet-100"><div className="h-full w-1/3 rounded-full bg-gradient-to-r from-violet-400 to-fuchsia-400 animate-[loadingBar_1.4s_ease-in-out_infinite]"></div></div>
+                    </div>
+                  ) : filteredPeriodActivities.length > 0 ? (
                     filteredPeriodActivities.map(act => (
                       <div 
                         key={act.id} 
@@ -2760,10 +2818,38 @@ const DEFAULT_MORE_APPS = [
         navigator.geolocation.getCurrentPosition(
           (pos) => {
             const { latitude, longitude, accuracy } = pos.coords;
-            const dist = calculateDistance(latitude, longitude, Number(selectedLokasi.latitude), Number(selectedLokasi.longitude));
+            // Saat presensi masuk, pilih otomatis titik kantor yang paling dekat
+            // dari seluruh lokasi yang memang diizinkan untuk karyawan ini.
+            const nearestLokasi = type === 'masuk'
+              ? availableLokasiList
+                  .filter(loc =>
+                    Number.isFinite(Number(loc.latitude)) &&
+                    Number.isFinite(Number(loc.longitude))
+                  )
+                  .map(loc => ({
+                    lokasi: loc,
+                    jarak: calculateDistance(
+                      latitude,
+                      longitude,
+                      Number(loc.latitude),
+                      Number(loc.longitude)
+                    )
+                  }))
+                  .sort((a, b) => a.jarak - b.jarak)[0]?.lokasi
+              : null;
+            const targetLokasi = nearestLokasi || selectedLokasi;
+            if (nearestLokasi && String(nearestLokasi.id) !== String(selectedLokasi.id)) {
+              setSelectedLokasi(nearestLokasi);
+            }
+            const dist = calculateDistance(
+              latitude,
+              longitude,
+              Number(targetLokasi.latitude),
+              Number(targetLokasi.longitude)
+            );
             setUserCoords({ lat: latitude, lng: longitude });
             setDistance(dist);
-            setInRadius(dist <= Number(selectedLokasi.radius_meter));
+            setInRadius(dist <= Number(targetLokasi.radius_meter));
             setGpsAccuracy(Math.round(accuracy || 0));
             setGpsLoading(false);
           },
@@ -3518,7 +3604,13 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
         return map;
       }, [presensiList, todayStr]);
 
-      // Hitung jumlah rekan untuk masing-masing filter secara real-time hari ini
+      // Menu Rekan hanya menampilkan karyawan dengan status akun Aktif.
+      // Nilai kosong tetap dianggap Aktif agar kompatibel dengan data lama.
+      const activeKaryawanList = karyawanList.filter(k =>
+        String(k.status_akun || 'Aktif').trim().toLowerCase() === 'aktif'
+      );
+
+      // Hitung jumlah rekan untuk masing-masing filter dari karyawan aktif saja.
       const counts = useMemo(() => {
         let masuk = 0;
         let belumMasuk = 0;
@@ -3527,7 +3619,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
         let sakit = 0;
         let cuti = 0;
 
-        karyawanList.forEach(k => {
+        activeKaryawanList.forEach(k => {
           const att = presensiMasukByKaryawan.get(String(k.id));
           const status = att ? att.status : 'Belum Absen';
 
@@ -3540,7 +3632,7 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
         });
 
         return {
-          'Semua': karyawanList.length,
+          'Semua': activeKaryawanList.length,
           'Masuk': masuk,
           'Belum Masuk': belumMasuk,
           'Libur': libur,
@@ -3548,11 +3640,11 @@ ${uploadError.message || 'Silakan coba lagi.'}`);
           'Sakit': sakit,
           'Cuti': cuti
         };
-      }, [karyawanList, presensiList, todayStr]);
+      }, [activeKaryawanList, presensiList, todayStr]);
 
       const filters = ['Semua', 'Masuk', 'Belum Masuk', 'Libur', 'Izin', 'Sakit', 'Cuti'];
 
-      const filteredList = karyawanList.filter(k => {
+      const filteredList = activeKaryawanList.filter(k => {
         const nama = String(k.nama_lengkap || '').toLocaleLowerCase('id-ID');
         const query = searchNama.trim().toLocaleLowerCase('id-ID');
         if (query && !nama.includes(query)) return false;
