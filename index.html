@@ -499,17 +499,21 @@ const DEFAULT_MORE_APPS = [
               let from = 0;
               const allRows = [];
               const now = new Date();
-              const cycleStart = now.getDate() >= 26
+              // Muat data 2 rentang siklus: siklus yang sedang berjalan dan siklus
+              // terakhir yang sudah selesai, agar Smart Check dapat memeriksa full siklus sebelumnya.
+              const currentCycleStart = now.getDate() >= 26
                 ? new Date(now.getFullYear(), now.getMonth(), 26)
                 : new Date(now.getFullYear(), now.getMonth() - 1, 26);
-              const cycleEnd = now.getDate() >= 26
+              const currentCycleEnd = now.getDate() >= 26
                 ? new Date(now.getFullYear(), now.getMonth() + 1, 25)
                 : new Date(now.getFullYear(), now.getMonth(), 25);
+              const fetchStart = new Date(currentCycleStart.getFullYear(), currentCycleStart.getMonth() - 1, 26);
+              const fetchEnd = currentCycleEnd;
               const toKey = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
               while (true) {
                 let query = client.from('presensi').select('*');
                 if (!adminMode) query = query.eq('karyawan_id', employeeId)
-                  .gte('tanggal', toKey(cycleStart)).lte('tanggal', toKey(cycleEnd));
+                  .gte('tanggal', toKey(fetchStart)).lte('tanggal', toKey(fetchEnd));
                 const pageResult = await query
                   .order('created_at', { ascending: false })
                   .range(from, from + pageSize - 1);
@@ -1649,18 +1653,24 @@ const DEFAULT_MORE_APPS = [
         // Data presensi dan klaim harus sudah selesai dimuat agar tanggal yang sudah tercatat tidak ditanyakan.
         if (!isPresensiReady || !currentUser?.id) return;
         const now = new Date();
-        const cycleStart = now.getDate() >= 26
-          ? new Date(now.getFullYear(), now.getMonth(), 26)
-          : new Date(now.getFullYear(), now.getMonth() - 1, 26);
-        const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        // Smart Check selalu memeriksa FULL siklus terakhir yang telah selesai (26-25),
+        // dan tidak bergeser sampai siklus itu berganti pada tanggal 26 berikutnya.
+        const completedCycleStart = now.getDate() >= 26
+          ? new Date(now.getFullYear(), now.getMonth() - 1, 26)
+          : new Date(now.getFullYear(), now.getMonth() - 2, 26);
+        const completedCycleEnd = now.getDate() >= 26
+          ? new Date(now.getFullYear(), now.getMonth(), 25)
+          : new Date(now.getFullYear(), now.getMonth() - 1, 25);
+        // Batas eksklusif untuk loop tanggal: hari setelah akhir siklus yang selesai.
+        const completedCycleEndExclusive = new Date(completedCycleEnd.getFullYear(), completedCycleEnd.getMonth(), completedCycleEnd.getDate() + 1);
         // Karyawan baru tidak diminta mengonfirmasi tanggal sebelum tanggal mulai bekerja.
-        // Untuk data karyawan lama yang belum memiliki tanggal_masuk, gunakan awal siklus agar perilaku lama tetap terjaga.
+        // Untuk data karyawan lama yang belum memiliki tanggal_masuk, gunakan awal siklus.
         const employeeStartRaw = String(currentUser.tanggal_masuk || '').slice(0, 10);
         const employeeStartMatch = employeeStartRaw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
         const employeeStartDate = employeeStartMatch
           ? new Date(Number(employeeStartMatch[1]), Number(employeeStartMatch[2]) - 1, Number(employeeStartMatch[3]))
-          : new Date(cycleStart);
-        const effectiveStartDate = employeeStartDate > cycleStart ? employeeStartDate : cycleStart;
+          : new Date(completedCycleStart);
+        const effectiveStartDate = employeeStartDate > completedCycleStart ? employeeStartDate : completedCycleStart;
         const records = (Array.isArray(presensiList) ? presensiList : []).filter(p =>
           String(p.karyawan_id) === String(currentUser.id)
         );
@@ -1670,7 +1680,7 @@ const DEFAULT_MORE_APPS = [
         const recordedDates = new Set(records.map(p => String(p.tanggal || '').slice(0, 10)).filter(Boolean));
         const claimedDates = new Set(claims.map(c => String(c.tanggal_klaim || '').slice(0, 10)).filter(Boolean));
         const missing = [];
-        for (let d = new Date(effectiveStartDate); d < todayStart; d.setDate(d.getDate() + 1)) {
+        for (let d = new Date(effectiveStartDate); d < completedCycleEndExclusive; d.setDate(d.getDate() + 1)) {
           const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
           if (!recordedDates.has(key) && !claimedDates.has(key)) missing.push(key);
         }
