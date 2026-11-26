@@ -1910,10 +1910,24 @@ const DEFAULT_MORE_APPS = [
             ))
           ]);
 
-          if (status === 'Libur' && Number(currentUser.sisa_libur) > 0) {
-            setCurrentUser(prev => ({ ...prev, sisa_libur: Number(prev.sisa_libur) - 1 }));
-          } else if (status === 'Cuti' && Number(currentUser.sisa_cuti) > 0) {
-            setCurrentUser(prev => ({ ...prev, sisa_cuti: Number(prev.sisa_cuti) - 1 }));
+          // Konfirmasi Smart Check dapat mencatat tanggal pada siklus payroll yang telah selesai.
+          // Untuk tanggal di luar siklus aktif, saldo acuan master harus diperbarui secara persisten
+          // (tidak cukup hanya mengubah state UI), karena employeeStats hanya menghitung siklus aktif.
+          const isDateActiveCycle = isDateInPayrollCycle(yStr);
+          if (status === 'Libur' && Number(currentUser.sisa_libur ?? 0) > 0) {
+            if (!isDateActiveCycle) {
+              const nextBalance = Math.max(0, Number(currentUser.sisa_libur) - 1);
+              const { error: balanceError } = await client.from('master_karyawan').update({ sisa_libur: nextBalance }).eq('id', currentUser.id);
+              if (balanceError) throw balanceError;
+              setCurrentUser(prev => ({ ...prev, sisa_libur: nextBalance }));
+            }
+          } else if (status === 'Cuti' && Number(currentUser.sisa_cuti ?? 0) > 0) {
+            if (!isDateActiveCycle) {
+              const nextBalance = Math.max(0, Number(currentUser.sisa_cuti) - 1);
+              const { error: balanceError } = await client.from('master_karyawan').update({ sisa_cuti: nextBalance }).eq('id', currentUser.id);
+              if (balanceError) throw balanceError;
+              setCurrentUser(prev => ({ ...prev, sisa_cuti: nextBalance }));
+            }
           }
 
           setMissingAttendanceDates(prev => prev.filter(d => d !== yStr));
